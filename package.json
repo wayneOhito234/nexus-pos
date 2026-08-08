@@ -1,0 +1,14 @@
+{
+  "name": "nexus-pos",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:server": "npm run dev -w @nexus-pos/server",
+    "dev:terminal": "npm run dev -w @nexus-pos/terminal",
+    "seed": "npm run seed -w @nexus-pos/server"
+  }
+}

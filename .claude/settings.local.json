@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(psql *)",
+      "Bash(npm --version)",
+      "Bash(sudo -n cat /etc/postgresql/*/main/pg_hba.conf)",
+      "Bash(grep -v '^$')",
+      "Bash(npm install *)",
+      "Bash(npm run *)",
+      "Bash(curl -s http://localhost:4000/health)",
+      "Bash(curl -s http://localhost:4000/api/products)",
+      "Bash(node -e \"console.log\\(require\\('/home/wayneohito/Development/nexus-pos/apps/terminal/node_modules/electron'\\)\\)\")",
+      "Bash(node -e ' *)",
+      "Bash(ELECTRON_RUN_AS_NODE=1 ./node_modules/.bin/electron -e ' *)",
+      "Bash(disown)",
+      "Bash(apt list *)",
+      "Bash(curl -s http://localhost:5173/src/main.jsx)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://localhost:5173/src/App.jsx)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\\\\n\" http://localhost:5173/@fs/home/wayneohito/Development/nexus-pos/packages/shared/index.js)"
+    ]
+  }
+}
