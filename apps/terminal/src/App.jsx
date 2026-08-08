@@ -18,7 +18,7 @@ import { ToastContainer } from './components/ToastContainer.jsx';
 import { useToasts } from './hooks/useToasts.js';
 import { fetchProducts, postSale, initiateStkPush, checkPaymentStatus, loadServerOrigin, SERVER_ORIGIN } from './api/client.js';
 import { clockOut, fetchAnalyticsSummary, openDrawer } from './api/managerClient.js';
-import { connectSocket } from './socket.js';
+import { connectSocket, getSocket } from './socket.js';
 import { loadTerminalId, getTerminalId } from './terminalId.js';
 
 const BRANCH_NAME = 'Exit Mart Supermarket';
@@ -107,8 +107,8 @@ export default function App() {
 
   useEffect(() => {
     if (!socketReady) return;
-    const socketModule = require('./socket.js');
-    const socket = socketModule.socket;
+    const socket = getSocket();
+    if (!socket) return;
 
     const handleConnect = () => setOnline(true);
     const handleDisconnect = () => setOnline(false);

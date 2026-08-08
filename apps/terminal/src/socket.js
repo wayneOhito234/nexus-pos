@@ -1,12 +1,16 @@
 import { io } from 'socket.io-client';
 
-export let socket = null;
+let socketInstance = null;
 
 export function connectSocket(serverOrigin) {
-  if (socket) return socket;
-  socket = io(serverOrigin, {
+  if (socketInstance) return socketInstance;
+  socketInstance = io(serverOrigin, {
     autoConnect: true,
     reconnection: true,
   });
-  return socket;
+  return socketInstance;
+}
+
+export function getSocket() {
+  return socketInstance;
 }
