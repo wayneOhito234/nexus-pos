@@ -1,4 +1,12 @@
-export const SERVER_ORIGIN = 'http://localhost:4000';
+export let SERVER_ORIGIN = 'http://localhost:4000'; // overwritten once config loads
+
+export async function loadServerOrigin() {
+  const config = await window.nexusConfig?.read();
+  if (config?.serverOrigin) {
+    SERVER_ORIGIN = config.serverOrigin;
+  }
+  return SERVER_ORIGIN;
+}
 
 export async function fetchProducts() {
   const res = await fetch(`${SERVER_ORIGIN}/api/products`);

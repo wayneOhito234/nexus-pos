@@ -1,16 +1,19 @@
 const path = require('node:path');
 const { app, BrowserWindow, ipcMain, Menu } = require('electron');
 const { getCachedProducts, setCachedProducts } = require('./db');
+const { readConfig, writeConfig, isConfigured } = require('./config');
 
 app.disableHardwareAcceleration();
-Menu.setApplicationMenu(null); // removes File/Edit/View/Window/Help bar
+Menu.setApplicationMenu(null);
 
 let currentCashierId = null;
 
 async function clockOutCurrentCashier() {
   if (!currentCashierId) return;
+  const config = readConfig();
+  if (!config) return;
   try {
-    await fetch('http://localhost:4000/api/manager/shifts/clock-out', {
+    await fetch(`${config.serverOrigin}/api/manager/shifts/clock-out`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ cashier_id: currentCashierId }),
@@ -55,6 +58,10 @@ ipcMain.handle('session:set-cashier', (_event, cashierId) => {
 ipcMain.handle('session:clear-cashier', () => {
   currentCashierId = null;
 });
+
+ipcMain.handle('config:read', () => readConfig());
+ipcMain.handle('config:write', (_event, config) => writeConfig(config));
+ipcMain.handle('config:is-configured', () => isConfigured());
 
 app.whenReady().then(() => {
   createWindow();

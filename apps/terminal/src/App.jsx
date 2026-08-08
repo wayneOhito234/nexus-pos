@@ -13,16 +13,20 @@ import { ChangeConfirm } from './components/ChangeConfirm.jsx';
 import { AnalyticsPanel } from './components/AnalyticsPanel.jsx';
 import { AdminPanel } from './components/AdminPanel.jsx';
 import { Login } from './components/Login.jsx';
+import { TerminalSetup } from './components/TerminalSetup.jsx';
 import { ToastContainer } from './components/ToastContainer.jsx';
 import { useToasts } from './hooks/useToasts.js';
-import { fetchProducts, postSale, initiateStkPush, checkPaymentStatus } from './api/client.js';
+import { fetchProducts, postSale, initiateStkPush, checkPaymentStatus, loadServerOrigin, SERVER_ORIGIN } from './api/client.js';
 import { clockOut, fetchAnalyticsSummary, openDrawer } from './api/managerClient.js';
-import { socket } from './socket.js';
-import { getTerminalId } from './terminalId.js';
+import { connectSocket } from './socket.js';
+import { loadTerminalId, getTerminalId } from './terminalId.js';
 
 const BRANCH_NAME = 'Exit Mart Supermarket';
 
 export default function App() {
+  const [bootState, setBootState] = useState('checking'); // checking | needs-setup | ready
+  const [socketReady, setSocketReady] = useState(false);
+
   const [cashier, setCashier] = useState(null);
 
   const [products, setProducts] = useState([]);
@@ -48,7 +52,33 @@ export default function App() {
 
   const { toasts, addToast, removeToast } = useToasts();
 
+  // ---- Boot sequence: check config -> setup screen or continue ----
   useEffect(() => {
+    async function boot() {
+      const configured = await window.nexusConfig?.isConfigured();
+      if (!configured) {
+        setBootState('needs-setup');
+        return;
+      }
+      await loadServerOrigin();
+      await loadTerminalId();
+      connectSocket(SERVER_ORIGIN);
+      setSocketReady(true);
+      setBootState('ready');
+    }
+    boot();
+  }, []);
+
+  async function handleSetupComplete() {
+    await loadServerOrigin();
+    await loadTerminalId();
+    connectSocket(SERVER_ORIGIN);
+    setSocketReady(true);
+    setBootState('ready');
+  }
+
+  useEffect(() => {
+    if (bootState !== 'ready') return;
     let cancelled = false;
 
     async function loadProducts() {
@@ -73,9 +103,13 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [bootState]);
 
   useEffect(() => {
+    if (!socketReady) return;
+    const socketModule = require('./socket.js');
+    const socket = socketModule.socket;
+
     const handleConnect = () => setOnline(true);
     const handleDisconnect = () => setOnline(false);
     const handleStockUpdated = (updatedProducts) => {
@@ -97,9 +131,10 @@ export default function App() {
       socket.off('disconnect', handleDisconnect);
       socket.off(SOCKET_EVENTS.STOCK_UPDATED, handleStockUpdated);
     };
-  }, []);
+  }, [socketReady]);
 
   useEffect(() => {
+    if (bootState !== 'ready') return;
     let cancelled = false;
 
     async function loadKpi() {
@@ -107,7 +142,7 @@ export default function App() {
         const summary = await fetchAnalyticsSummary();
         if (!cancelled) setTodayKpi(summary);
       } catch (err) {
-        // Silent -- KPI strip just stays hidden if this fails, not worth a toast
+        // Silent -- KPI strip just stays hidden if this fails
       }
     }
 
@@ -117,7 +152,7 @@ export default function App() {
       cancelled = true;
       clearInterval(interval);
     };
-  }, []);
+  }, [bootState]);
 
   const categories = useMemo(
     () => Array.from(new Set(products.map((p) => p.category))).sort(),
@@ -355,6 +390,14 @@ export default function App() {
     window.nexusSession?.clearCashierId();
     setCashier(null);
     setManagerMode(false);
+  }
+
+  if (bootState === 'checking') {
+    return <div className="app" style={{ alignItems: 'center', justifyContent: 'center', display: 'flex' }} />;
+  }
+
+  if (bootState === 'needs-setup') {
+    return <TerminalSetup onConfigured={handleSetupComplete} />;
   }
 
   if (!cashier) {

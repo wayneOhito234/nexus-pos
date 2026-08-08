@@ -1,7 +1,12 @@
 import { io } from 'socket.io-client';
-import { SERVER_ORIGIN } from './api/client.js';
 
-export const socket = io(SERVER_ORIGIN, {
-  autoConnect: true,
-  reconnection: true,
-});
+export let socket = null;
+
+export function connectSocket(serverOrigin) {
+  if (socket) return socket;
+  socket = io(serverOrigin, {
+    autoConnect: true,
+    reconnection: true,
+  });
+  return socket;
+}
