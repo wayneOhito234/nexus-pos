@@ -12,6 +12,7 @@ function log(msg) {
 log('1: requires done');
 
 Menu.setApplicationMenu(null);
+app.disableHardwareAcceleration();
 log('2: menu set to null');
 
 let currentCashierId = null;
@@ -60,7 +61,7 @@ function createWindow() {
   win.webContents.on('did-fail-load', (_e, code, desc) => log(`did-fail-load: ${code} ${desc}`));
   win.webContents.on('render-process-gone', (_e, details) => log(`render-process-gone: ${JSON.stringify(details)}`));
 
-  if (process.env.NODE_ENV === 'production') {
+  if (process.env.NODE_ENV !== 'development') {
     log('loading production build from dist/index.html');
     win.loadFile(path.join(__dirname, '../dist/index.html'));
   } else {
