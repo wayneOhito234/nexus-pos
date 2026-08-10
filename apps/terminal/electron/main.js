@@ -1,7 +1,7 @@
 const path = require('node:path');
 const fs = require('node:fs');
 const { app, BrowserWindow, ipcMain, Menu } = require('electron');
-const { getCachedProducts, setCachedProducts, saveSaleLocally, getPendingSales, markSaleSynced, getPendingSyncCount } = require('./db');
+const { initDb, getCachedProducts, setCachedProducts, saveSaleLocally, getPendingSales, markSaleSynced, getPendingSyncCount } = require('./db');
 const { readConfig, writeConfig, isConfigured } = require('./config');
 
 const logFile = path.join(__dirname, 'boot-debug.log');
@@ -11,18 +11,8 @@ function log(msg) {
 
 log('1: requires done');
 
-app.commandLine.appendSwitch('no-sandbox');
-app.commandLine.appendSwitch('disable-gpu');
-app.commandLine.appendSwitch('disable-dev-shm-usage');
-app.commandLine.appendSwitch('use-gl', 'swiftshader');
-app.commandLine.appendSwitch('disable-seccomp-filter-sandbox');
-app.commandLine.appendSwitch('disable-features', 'NetworkServiceSandbox,IsolateOrigins,site-per-process');
-app.commandLine.appendSwitch('disable-site-isolation-trials');
-app.disableHardwareAcceleration();
-log('2: full flag set applied (sandbox, gpu, dev-shm, swiftshader, seccomp, network sandbox, site isolation)');
-
 Menu.setApplicationMenu(null);
-log('3: menu set to null');
+log('2: menu set to null');
 
 let currentCashierId = null;
 
@@ -48,7 +38,9 @@ function createWindow() {
     width: 1280,
     height: 800,
     title: 'Nexus POS',
+    icon: path.join(__dirname, 'icon.png'),
     autoHideMenuBar: true,
+    kiosk: process.env.NEXUS_KIOSK === 'true',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -56,6 +48,8 @@ function createWindow() {
     },
   });
   log('createWindow: BrowserWindow constructed');
+
+  win.removeMenu();
 
   win.once('ready-to-show', () => {
     log('ready-to-show fired, calling win.show()');
@@ -76,7 +70,7 @@ function createWindow() {
   }
 }
 
-log('4: about to register ipcMain handlers');
+log('3: about to register ipcMain handlers');
 
 ipcMain.handle('cache:get-products', () => getCachedProducts());
 ipcMain.handle('cache:set-products', (_event, products) => setCachedProducts(products));
@@ -90,17 +84,23 @@ ipcMain.handle('config:read', () => readConfig());
 ipcMain.handle('config:write', (_event, config) => writeConfig(config));
 ipcMain.handle('config:is-configured', () => isConfigured());
 
-log('5: ipcMain handlers registered, about to call app.whenReady()');
+log('4: ipcMain handlers registered');
 
-app.whenReady().then(() => {
-  log('6: app ready, about to create window');
+app.whenReady().then(async () => {
+  log('5: app ready, initialising local database');
+  try {
+    await initDb();
+    log('6: local database ready');
+  } catch (err) {
+    log(`local database init failed: ${err.message}`);
+  }
   createWindow();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
 });
 
-log('7: app.whenReady().then() call issued, script reached end');
+log('7: whenReady handler registered, script reached end');
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
