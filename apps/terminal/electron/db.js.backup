@@ -1,0 +1,182 @@
+const path = require('node:path');
+const { app } = require('electron');
+const Database = require('better-sqlite3');
+
+const dbPath = path.join(app.getPath('userData'), 'cache.sqlite');
+const db = new Database(dbPath);
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS products (
+    id INTEGER PRIMARY KEY,
+    sku TEXT,
+    barcode TEXT,
+    name TEXT,
+    category TEXT,
+    price REAL,
+    stock_qty INTEGER
+  )
+`);
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS local_sales (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    local_ref TEXT UNIQUE NOT NULL,
+    terminal_id TEXT NOT NULL,
+    payment_method TEXT NOT NULL,
+    subtotal REAL NOT NULL,
+    vat REAL NOT NULL,
+    total REAL NOT NULL,
+    amount_received REAL,
+    change_given REAL,
+    mpesa_ref TEXT,
+    synced INTEGER NOT NULL DEFAULT 0,
+    server_id INTEGER,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )
+`);
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS local_sale_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    local_sale_id INTEGER NOT NULL REFERENCES local_sales(id),
+    product_id INTEGER NOT NULL,
+    qty INTEGER NOT NULL,
+    price REAL NOT NULL
+  )
+`);
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS local_meta (
+    key TEXT PRIMARY KEY,
+    value INTEGER NOT NULL DEFAULT 0
+  )
+`);
+
+function getCachedProducts() {
+  return db.prepare('SELECT * FROM products ORDER BY name').all();
+}
+
+const upsert = db.prepare(`
+  INSERT INTO products (id, sku, barcode, name, category, price, stock_qty)
+  VALUES (@id, @sku, @barcode, @name, @category, @price, @stock_qty)
+  ON CONFLICT(id) DO UPDATE SET
+    sku = excluded.sku,
+    barcode = excluded.barcode,
+    name = excluded.name,
+    category = excluded.category,
+    price = excluded.price,
+    stock_qty = excluded.stock_qty
+`);
+
+function setCachedProducts(products) {
+  const tx = db.transaction((items) => {
+    for (const product of items) upsert.run(product);
+  });
+  tx(products);
+  return true;
+}
+
+function nextLocalRef(terminalId) {
+  const key = `ref_counter_${terminalId}`;
+  const row = db.prepare('SELECT value FROM local_meta WHERE key = ?').get(key);
+  const next = (row?.value || 0) + 1;
+
+  db.prepare(`
+    INSERT INTO local_meta (key, value) VALUES (?, ?)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+  `).run(key, next);
+
+  const padded = String(next).padStart(6, '0');
+  return `${terminalId.toUpperCase()}-${padded}`;
+}
+
+function saveSaleLocally({ terminal_id, payment_method, items, subtotal, vat, total, amount_received, change_given, mpesa_ref }) {
+  const localRef = nextLocalRef(terminal_id);
+
+  const insertSale = db.prepare(`
+    INSERT INTO local_sales
+      (local_ref, terminal_id, payment_method, subtotal, vat, total, amount_received, change_given, mpesa_ref)
+    VALUES (@local_ref, @terminal_id, @payment_method, @subtotal, @vat, @total, @amount_received, @change_given, @mpesa_ref)
+  `);
+
+  const insertItem = db.prepare(`
+    INSERT INTO local_sale_items (local_sale_id, product_id, qty, price)
+    VALUES (@local_sale_id, @product_id, @qty, @price)
+  `);
+
+  const decrementStock = db.prepare(`
+    UPDATE products SET stock_qty = stock_qty - @qty WHERE id = @product_id
+  `);
+
+  const tx = db.transaction(() => {
+    const result = insertSale.run({
+      local_ref: localRef,
+      terminal_id,
+      payment_method,
+      subtotal,
+      vat,
+      total,
+      amount_received: amount_received ?? null,
+      change_given: change_given ?? null,
+      mpesa_ref: mpesa_ref ?? null,
+    });
+
+    const localSaleId = result.lastInsertRowid;
+
+    for (const item of items) {
+      insertItem.run({ local_sale_id: localSaleId, product_id: item.product_id, qty: item.qty, price: item.price });
+      decrementStock.run({ qty: item.qty, product_id: item.product_id });
+    }
+
+    return localSaleId;
+  });
+
+  const localSaleId = tx();
+
+  return {
+    id: localSaleId,
+    local_ref: localRef,
+    terminal_id,
+    payment_method,
+    subtotal,
+    vat,
+    total,
+    amount_received,
+    change_given,
+    mpesa_ref,
+    items,
+  };
+}
+
+function getPendingSales() {
+  const sales = db.prepare(`
+    SELECT * FROM local_sales WHERE synced = 0 ORDER BY created_at ASC
+  `).all();
+
+  const getItems = db.prepare('SELECT product_id, qty, price FROM local_sale_items WHERE local_sale_id = ?');
+
+  return sales.map((sale) => ({
+    ...sale,
+    items: getItems.all(sale.id),
+  }));
+}
+
+function markSaleSynced(localSaleId, serverId) {
+  db.prepare(`
+    UPDATE local_sales SET synced = 1, server_id = ? WHERE id = ?
+  `).run(serverId, localSaleId);
+}
+
+function getPendingSyncCount() {
+  const row = db.prepare('SELECT COUNT(*) AS count FROM local_sales WHERE synced = 0').get();
+  return row.count;
+}
+
+module.exports = {
+  getCachedProducts,
+  setCachedProducts,
+  saveSaleLocally,
+  getPendingSales,
+  markSaleSynced,
+  getPendingSyncCount,
+};

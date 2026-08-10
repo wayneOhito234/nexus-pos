@@ -12,14 +12,7 @@ function log(msg) {
 log('1: requires done');
 
 app.commandLine.appendSwitch('no-sandbox');
-app.commandLine.appendSwitch('disable-gpu');
-app.commandLine.appendSwitch('disable-dev-shm-usage');
-app.commandLine.appendSwitch('use-gl', 'swiftshader');
-app.commandLine.appendSwitch('disable-seccomp-filter-sandbox');
-app.commandLine.appendSwitch('disable-features', 'NetworkServiceSandbox,IsolateOrigins,site-per-process');
-app.commandLine.appendSwitch('disable-site-isolation-trials');
-app.disableHardwareAcceleration();
-log('2: full flag set applied (sandbox, gpu, dev-shm, swiftshader, seccomp, network sandbox, site isolation)');
+log('2: no-sandbox switch appended');
 
 Menu.setApplicationMenu(null);
 log('3: menu set to null');
@@ -66,14 +59,9 @@ function createWindow() {
   win.webContents.on('did-fail-load', (_e, code, desc) => log(`did-fail-load: ${code} ${desc}`));
   win.webContents.on('render-process-gone', (_e, details) => log(`render-process-gone: ${JSON.stringify(details)}`));
 
-  if (process.env.NODE_ENV === 'production') {
-    log('loading production build from dist/index.html');
-    win.loadFile(path.join(__dirname, '../dist/index.html'));
-  } else {
-    log('loading dev URL http://localhost:5173');
-    win.loadURL('http://localhost:5173');
-    win.webContents.openDevTools({ mode: 'detach' });
-  }
+  log('loading dev URL http://localhost:5173');
+  win.loadURL('http://localhost:5173');
+  win.webContents.openDevTools({ mode: 'detach' });
 }
 
 log('4: about to register ipcMain handlers');

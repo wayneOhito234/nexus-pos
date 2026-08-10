@@ -1,0 +1,220 @@
+const path = require('node:path');
+const { app } = require('electron');
+const Database = require('better-sqlite3');
+
+const dbPath = path.join(app.getPath('userData'), 'cache.sqlite');
+const db = new Database(dbPath);
+
+db.pragma('foreign_keys = ON');
+db.pragma('journal_mode = WAL');
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS products (
+    id INTEGER PRIMARY KEY,
+    sku TEXT,
+    barcode TEXT,
+    name TEXT,
+    category TEXT,
+    price REAL,
+    stock_qty INTEGER
+  )
+`);
+
+// Money is stored as integer cents internally to avoid floating-point
+// rounding drift. Every function in this file that accepts or returns
+// a monetary value still uses ordinary decimal numbers -- the
+// cents conversion happens only at the boundary, inside this file.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS local_sales (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    local_ref TEXT UNIQUE NOT NULL,
+    terminal_id TEXT NOT NULL,
+    payment_method TEXT NOT NULL,
+    subtotal_cents INTEGER NOT NULL,
+    vat_cents INTEGER NOT NULL,
+    total_cents INTEGER NOT NULL,
+    amount_received_cents INTEGER,
+    change_given_cents INTEGER,
+    mpesa_ref TEXT,
+    synced INTEGER NOT NULL DEFAULT 0,
+    server_id INTEGER,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )
+`);
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS local_sale_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    local_sale_id INTEGER NOT NULL REFERENCES local_sales(id),
+    product_id INTEGER NOT NULL,
+    qty INTEGER NOT NULL,
+    price_cents INTEGER NOT NULL
+  )
+`);
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS local_meta (
+    key TEXT PRIMARY KEY,
+    value INTEGER NOT NULL DEFAULT 0
+  )
+`);
+
+db.exec(`CREATE INDEX IF NOT EXISTS idx_local_sales_synced ON local_sales(synced)`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_local_sale_items_sale_id ON local_sale_items(local_sale_id)`);
+db.exec(`CREATE INDEX IF NOT EXISTS idx_local_sale_items_product_id ON local_sale_items(product_id)`);
+
+const toCents = (value) => (value === null || value === undefined ? null : Math.round(Number(value) * 100));
+const fromCents = (cents) => (cents === null || cents === undefined ? null : cents / 100);
+
+function getCachedProducts() {
+  return db.prepare('SELECT * FROM products ORDER BY name').all();
+}
+
+const upsert = db.prepare(`
+  INSERT INTO products (id, sku, barcode, name, category, price, stock_qty)
+  VALUES (@id, @sku, @barcode, @name, @category, @price, @stock_qty)
+  ON CONFLICT(id) DO UPDATE SET
+    sku = excluded.sku,
+    barcode = excluded.barcode,
+    name = excluded.name,
+    category = excluded.category,
+    price = excluded.price,
+    stock_qty = excluded.stock_qty
+`);
+
+function setCachedProducts(products) {
+  const tx = db.transaction((items) => {
+    for (const product of items) upsert.run(product);
+  });
+  tx(products);
+  return true;
+}
+
+// Reads and increments the per-till counter. Called from inside
+// saveSaleLocally's own transaction, so if the sale insert fails
+// afterward, this increment is rolled back along with it.
+function nextLocalRefWithinTx(terminalId) {
+  const key = `ref_counter_${terminalId}`;
+  const row = db.prepare('SELECT value FROM local_meta WHERE key = ?').get(key);
+  const next = (row?.value || 0) + 1;
+
+  db.prepare(`
+    INSERT INTO local_meta (key, value) VALUES (?, ?)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+  `).run(key, next);
+
+  const padded = String(next).padStart(6, '0');
+  return `${terminalId.toUpperCase()}-${padded}`;
+}
+
+function saveSaleLocally({ terminal_id, payment_method, items, subtotal, vat, total, amount_received, change_given, mpesa_ref }) {
+  const insertSale = db.prepare(`
+    INSERT INTO local_sales
+      (local_ref, terminal_id, payment_method, subtotal_cents, vat_cents, total_cents, amount_received_cents, change_given_cents, mpesa_ref)
+    VALUES (@local_ref, @terminal_id, @payment_method, @subtotal_cents, @vat_cents, @total_cents, @amount_received_cents, @change_given_cents, @mpesa_ref)
+  `);
+
+  const insertItem = db.prepare(`
+    INSERT INTO local_sale_items (local_sale_id, product_id, qty, price_cents)
+    VALUES (@local_sale_id, @product_id, @qty, @price_cents)
+  `);
+
+  const decrementStock = db.prepare(`
+    UPDATE products SET stock_qty = stock_qty - @qty WHERE id = @product_id
+  `);
+
+  const tx = db.transaction(() => {
+    const localRef = nextLocalRefWithinTx(terminal_id);
+
+    const result = insertSale.run({
+      local_ref: localRef,
+      terminal_id,
+      payment_method,
+      subtotal_cents: toCents(subtotal),
+      vat_cents: toCents(vat),
+      total_cents: toCents(total),
+      amount_received_cents: toCents(amount_received),
+      change_given_cents: toCents(change_given),
+      mpesa_ref: mpesa_ref ?? null,
+    });
+
+    const localSaleId = result.lastInsertRowid;
+
+    for (const item of items) {
+      insertItem.run({
+        local_sale_id: localSaleId,
+        product_id: item.product_id,
+        qty: item.qty,
+        price_cents: toCents(item.price),
+      });
+      decrementStock.run({ qty: item.qty, product_id: item.product_id });
+    }
+
+    return { localSaleId, localRef };
+  });
+
+  const { localSaleId, localRef } = tx();
+
+  return {
+    id: localSaleId,
+    local_ref: localRef,
+    terminal_id,
+    payment_method,
+    subtotal,
+    vat,
+    total,
+    amount_received,
+    change_given,
+    mpesa_ref,
+    items,
+  };
+}
+
+function getPendingSales() {
+  const sales = db.prepare(`
+    SELECT * FROM local_sales WHERE synced = 0 ORDER BY created_at ASC
+  `).all();
+
+  const getItems = db.prepare('SELECT product_id, qty, price_cents FROM local_sale_items WHERE local_sale_id = ?');
+
+  return sales.map((sale) => ({
+    id: sale.id,
+    local_ref: sale.local_ref,
+    terminal_id: sale.terminal_id,
+    payment_method: sale.payment_method,
+    subtotal: fromCents(sale.subtotal_cents),
+    vat: fromCents(sale.vat_cents),
+    total: fromCents(sale.total_cents),
+    amount_received: fromCents(sale.amount_received_cents),
+    change_given: fromCents(sale.change_given_cents),
+    mpesa_ref: sale.mpesa_ref,
+    synced: sale.synced,
+    server_id: sale.server_id,
+    created_at: sale.created_at,
+    items: getItems.all(sale.id).map((i) => ({
+      product_id: i.product_id,
+      qty: i.qty,
+      price: fromCents(i.price_cents),
+    })),
+  }));
+}
+
+function markSaleSynced(localSaleId, serverId) {
+  db.prepare(`
+    UPDATE local_sales SET synced = 1, server_id = ? WHERE id = ?
+  `).run(serverId, localSaleId);
+}
+
+function getPendingSyncCount() {
+  const row = db.prepare('SELECT COUNT(*) AS count FROM local_sales WHERE synced = 0').get();
+  return row.count;
+}
+
+module.exports = {
+  getCachedProducts,
+  setCachedProducts,
+  saveSaleLocally,
+  getPendingSales,
+  markSaleSynced,
+  getPendingSyncCount,
+};

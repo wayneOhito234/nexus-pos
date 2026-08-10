@@ -15,3 +15,10 @@ contextBridge.exposeInMainWorld('nexusConfig', {
   write: (config) => ipcRenderer.invoke('config:write', config),
   isConfigured: () => ipcRenderer.invoke('config:is-configured'),
 });
+
+contextBridge.exposeInMainWorld('nexusSales', {
+  saveLocal: (sale) => ipcRenderer.invoke('sales:save-local', sale),
+  getPending: () => ipcRenderer.invoke('sales:get-pending'),
+  markSynced: (localSaleId, serverId) => ipcRenderer.invoke('sales:mark-synced', localSaleId, serverId),
+  pendingCount: () => ipcRenderer.invoke('sales:pending-count'),
+});

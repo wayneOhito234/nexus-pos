@@ -4,7 +4,6 @@
   "private": true,
   "main": "electron/main.js",
   "scripts": {
-    "postinstall": "electron-rebuild -f -w better-sqlite3",
     "dev": "concurrently -k \"vite\" \"npm:electron:dev\"",
     "electron:dev": "wait-on tcp:5173 && cross-env NODE_ENV=development electron .",
     "dev:terminal2": "wait-on tcp:5173 && cross-env NODE_ENV=development electron . --user-data-dir=/tmp/nexus-terminal-2",
@@ -13,18 +12,17 @@
   },
   "dependencies": {
     "@nexus-pos/shared": "0.1.0",
-    "better-sqlite3": "^11.3.0",
     "lucide-react": "^1.28.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "socket.io-client": "^4.7.5"
+    "socket.io-client": "^4.7.5",
+    "sql.js": "^1.11.0"
   },
   "devDependencies": {
-    "@electron/rebuild": "^3.6.1",
     "@vitejs/plugin-react": "^4.3.1",
     "concurrently": "^8.2.2",
     "cross-env": "^7.0.3",
-    "electron": "^31.3.0",
+    "electron": "^43.3.0",
     "vite": "^5.4.0",
     "wait-on": "^7.2.0"
   }
