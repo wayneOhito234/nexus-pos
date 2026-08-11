@@ -1811,9 +1811,10 @@ input:focus-visible {
 }
 /* ============================================================
    PRINT — 80mm thermal receipt
-   Uses display:none rather than visibility:hidden, so hidden
-   elements don't keep occupying layout space and push the
-   receipt outside the printable area.
+   #root and .app must stay displayed, because hiding an ancestor
+   hides its descendants no matter what the child rules say.
+   Instead, everything is hidden by default and the chain down to
+   the receipt is explicitly restored.
    ============================================================ */
 @media print {
   @page {
@@ -1823,24 +1824,47 @@ input:focus-visible {
 
   html,
   body {
-    width: 80mm;
+    width: 80mm !important;
+    height: auto !important;
     margin: 0 !important;
     padding: 0 !important;
     background: #fff !important;
+    overflow: visible !important;
   }
 
-  /* Hide the whole app, then bring back only the receipt. */
-  body > * {
+  /* Hide every direct child of the app shell, but keep the shell itself. */
+  #root > *,
+  .app > *,
+  .app__toolbar,
+  .app__body,
+  .top-bar,
+  .toast-container {
     display: none !important;
+  }
+
+  /* Restore the chain that leads to the receipt. */
+  #root,
+  .app {
+    display: block !important;
+    position: static !important;
+    width: 80mm !important;
+    height: auto !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    background: #fff !important;
+    overflow: visible !important;
   }
 
   .receipt-overlay {
     display: block !important;
     position: static !important;
+    inset: auto !important;
+    width: 80mm !important;
+    height: auto !important;
     background: none !important;
     padding: 0 !important;
-    inset: auto !important;
     backdrop-filter: none !important;
+    animation: none !important;
   }
 
   .receipt {
@@ -1848,6 +1872,7 @@ input:focus-visible {
     position: static !important;
     width: 72mm !important;
     max-width: 72mm !important;
+    max-height: none !important;
     margin: 0 !important;
     padding: 3mm !important;
     background: #fff !important;
@@ -1855,16 +1880,19 @@ input:focus-visible {
     border: none !important;
     border-radius: 0 !important;
     box-shadow: none !important;
+    overflow: visible !important;
     font-family: "Courier New", ui-monospace, monospace !important;
     font-size: 10pt !important;
     line-height: 1.35 !important;
     animation: none !important;
+    transform: none !important;
   }
 
   .receipt * {
     color: #000 !important;
     background: transparent !important;
     box-shadow: none !important;
+    visibility: visible !important;
   }
 
   .receipt hr {
@@ -1919,7 +1947,7 @@ input:focus-visible {
 
   .receipt__thanks {
     text-align: center !important;
-    margin: 3mm 0 0 !important;
+    margin: 3mm 0 6mm !important;
     font-size: 9pt !important;
   }
 
@@ -1928,17 +1956,9 @@ input:focus-visible {
     letter-spacing: 1px !important;
   }
 
-  /* Nothing interactive belongs on paper. */
   .receipt__actions,
   .receipt button,
   button {
     display: none !important;
-  }
-
-  /* Blank space after the last line so the cut doesn't clip the text. */
-  .receipt::after {
-    content: "";
-    display: block;
-    height: 8mm;
   }
 }
