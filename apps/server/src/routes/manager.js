@@ -21,7 +21,6 @@ managerRouter.get('/cashiers', async (req, res) => {
 
 // POST /api/manager/cashiers/register
 // body: { first_name, last_name, password, role? }
-// Manager creates a new cashier account with a password.
 managerRouter.post('/cashiers/register', async (req, res) => {
   const { first_name, last_name, password, role } = req.body;
 
@@ -56,8 +55,6 @@ managerRouter.post('/cashiers/register', async (req, res) => {
 
 // POST /api/manager/cashiers/login
 // body: { first_name, last_name, password, terminal_id }
-// Verifies password, then clocks the cashier in (reuses the same
-// terminal-occupied and already-clocked-in checks as /shifts/clock-in).
 managerRouter.post('/cashiers/login', async (req, res) => {
   const { first_name, last_name, password, terminal_id } = req.body;
 
@@ -105,8 +102,6 @@ managerRouter.post('/cashiers/login', async (req, res) => {
 });
 
 // DELETE /api/manager/cashiers/:id
-// Removes a cashier account entirely. Blocked if they're currently
-// clocked in -- they must be clocked out first.
 managerRouter.delete('/cashiers/:id', async (req, res) => {
   const { id } = req.params;
 
@@ -129,10 +124,7 @@ managerRouter.delete('/cashiers/:id', async (req, res) => {
 });
 
 // PATCH /api/manager/cashiers/:id/role
-// body: { role } -- only 'cashier' or 'manager' allowed here.
-// The 'admin' role is intentionally never assignable through this
-// endpoint -- it's set directly in the database, so nobody can
-// escalate their own or another account to admin through the UI.
+// The 'admin' role is intentionally never assignable through this endpoint.
 managerRouter.patch('/cashiers/:id/role', async (req, res) => {
   const { id } = req.params;
   const { role } = req.body;
@@ -154,7 +146,6 @@ managerRouter.patch('/cashiers/:id/role', async (req, res) => {
 });
 
 // POST /api/manager/shifts/clock-in
-// body: { cashier_id, terminal_id }
 managerRouter.post('/shifts/clock-in', async (req, res) => {
   const { cashier_id, terminal_id } = req.body;
   if (!cashier_id || !terminal_id) {
@@ -185,7 +176,6 @@ managerRouter.post('/shifts/clock-in', async (req, res) => {
 });
 
 // POST /api/manager/shifts/clock-out
-// body: { cashier_id }
 managerRouter.post('/shifts/clock-out', async (req, res) => {
   const { cashier_id } = req.body;
   if (!cashier_id) {
@@ -216,7 +206,6 @@ managerRouter.post('/shifts/clock-out-all', async (req, res) => {
 });
 
 // GET /api/manager/shifts/history
-// All shifts, most recent first -- who worked when, on which terminal.
 managerRouter.get('/shifts/history', async (req, res) => {
   const { rows } = await pool.query(`
     SELECT s.id, c.name, c.role, s.terminal_id, s.clock_in, s.clock_out
@@ -229,7 +218,6 @@ managerRouter.get('/shifts/history', async (req, res) => {
 });
 
 // GET /api/manager/sales/history
-// All sales, most recent first.
 managerRouter.get('/sales/history', async (req, res) => {
   const { rows } = await pool.query(`
     SELECT id, terminal_id, payment_method, total, mpesa_ref, created_at
@@ -241,7 +229,6 @@ managerRouter.get('/sales/history', async (req, res) => {
 });
 
 // POST /api/manager/drawer/open
-// body: { cashier_id, terminal_id, reason }
 // Logs a drawer opening that isn't tied to a sale (a "No Sale" open).
 managerRouter.post('/drawer/open', async (req, res) => {
   const { cashier_id, terminal_id, reason } = req.body;
@@ -269,8 +256,179 @@ managerRouter.get('/drawer/history', async (req, res) => {
   res.json(rows);
 });
 
+// ============================================================
+// Product management
+// ============================================================
+
+// GET /api/manager/products
+// Full catalogue including inactive items, which the till never sees.
+managerRouter.get('/products', async (req, res) => {
+  const { rows } = await pool.query(`
+    SELECT id, sku, barcode, name, category, price, cost_price, stock_qty,
+           reorder_level, active, created_at
+    FROM products
+    ORDER BY active DESC, name
+  `);
+  res.json(rows);
+});
+
+// GET /api/manager/products/next-sku
+// Suggests the next SKU so the form can prefill it. The manager can still
+// overwrite it before saving.
+managerRouter.get('/products/next-sku', async (req, res) => {
+  const { rows } = await pool.query(`
+    SELECT sku FROM products
+    WHERE sku ~ '^PRD-[0-9]+$'
+    ORDER BY CAST(SUBSTRING(sku FROM 5) AS INTEGER) DESC
+    LIMIT 1
+  `);
+
+  const lastNumber = rows.length > 0 ? parseInt(rows[0].sku.slice(4), 10) : 0;
+  res.json({ sku: `PRD-${String(lastNumber + 1).padStart(4, '0')}` });
+});
+
+// GET /api/manager/products/categories
+// Existing categories, so the form can offer them rather than relying on
+// the manager to retype them consistently.
+managerRouter.get('/products/categories', async (req, res) => {
+  const { rows } = await pool.query(
+    'SELECT DISTINCT category FROM products WHERE category IS NOT NULL ORDER BY category'
+  );
+  res.json(rows.map((r) => r.category));
+});
+
+// POST /api/manager/products
+// body: { sku, barcode, name, category, price, cost_price?, stock_qty?, reorder_level? }
+managerRouter.post('/products', async (req, res) => {
+  const { sku, barcode, name, category, price, cost_price, stock_qty, reorder_level } = req.body;
+
+  if (!sku || !barcode || !name || !category || price === undefined) {
+    return res.status(400).json({ error: 'sku, barcode, name, category and price are required' });
+  }
+  if (Number(price) < 0) {
+    return res.status(400).json({ error: 'price cannot be negative' });
+  }
+
+  const { rows: clash } = await pool.query(
+    'SELECT id, sku, barcode FROM products WHERE sku = $1 OR barcode = $2',
+    [sku.trim(), barcode.trim()]
+  );
+  if (clash.length > 0) {
+    const which = clash[0].sku === sku.trim() ? 'SKU' : 'barcode';
+    return res.status(409).json({ error: `That ${which} is already in use` });
+  }
+
+  const { rows } = await pool.query(
+    `INSERT INTO products (sku, barcode, name, category, price, cost_price, stock_qty, reorder_level)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+     RETURNING id, sku, barcode, name, category, price, cost_price, stock_qty, reorder_level, active, created_at`,
+    [
+      sku.trim(),
+      barcode.trim(),
+      name.trim(),
+      category.trim(),
+      price,
+      cost_price ?? null,
+      stock_qty ?? 0,
+      reorder_level ?? 10,
+    ]
+  );
+
+  const io = req.app.get('io');
+  io.emit('stock:updated', [rows[0]]);
+
+  res.status(201).json(rows[0]);
+});
+
+// PATCH /api/manager/products/:id/details
+// Editing the descriptive fields. Stock and price quick-edits stay on the
+// plain PATCH route below.
+managerRouter.patch('/products/:id/details', async (req, res) => {
+  const { id } = req.params;
+  const { sku, barcode, name, category, price, cost_price, reorder_level } = req.body;
+
+  const fields = [];
+  const values = [];
+  let i = 1;
+
+  const maybe = (column, value) => {
+    if (value !== undefined) {
+      fields.push(`${column} = $${i++}`);
+      values.push(value);
+    }
+  };
+
+  maybe('sku', sku?.trim());
+  maybe('barcode', barcode?.trim());
+  maybe('name', name?.trim());
+  maybe('category', category?.trim());
+  maybe('price', price);
+  maybe('cost_price', cost_price);
+  maybe('reorder_level', reorder_level);
+
+  if (fields.length === 0) {
+    return res.status(400).json({ error: 'nothing to update' });
+  }
+
+  if (sku || barcode) {
+    const { rows: clash } = await pool.query(
+      'SELECT id FROM products WHERE (sku = $1 OR barcode = $2) AND id <> $3',
+      [sku?.trim() ?? null, barcode?.trim() ?? null, id]
+    );
+    if (clash.length > 0) {
+      return res.status(409).json({ error: 'That SKU or barcode belongs to another product' });
+    }
+  }
+
+  values.push(id);
+
+  const { rows } = await pool.query(
+    `UPDATE products SET ${fields.join(', ')} WHERE id = $${i}
+     RETURNING id, sku, barcode, name, category, price, cost_price, stock_qty, reorder_level, active`,
+    values
+  );
+
+  if (rows.length === 0) {
+    return res.status(404).json({ error: 'product not found' });
+  }
+
+  const io = req.app.get('io');
+  io.emit('stock:updated', [rows[0]]);
+
+  res.json(rows[0]);
+});
+
+// PATCH /api/manager/products/:id/active
+// body: { active }
+// Soft delete. The product vanishes from the till but stays intact in sales
+// history, so old receipts and reports don't break.
+managerRouter.patch('/products/:id/active', async (req, res) => {
+  const { id } = req.params;
+  const { active } = req.body;
+
+  if (typeof active !== 'boolean') {
+    return res.status(400).json({ error: 'active must be true or false' });
+  }
+
+  const { rows } = await pool.query(
+    `UPDATE products SET active = $1 WHERE id = $2
+     RETURNING id, sku, barcode, name, category, price, stock_qty, reorder_level, active`,
+    [active, id]
+  );
+
+  if (rows.length === 0) {
+    return res.status(404).json({ error: 'product not found' });
+  }
+
+  const io = req.app.get('io');
+  io.emit('stock:updated', [rows[0]]);
+
+  res.json(rows[0]);
+});
+
 // PATCH /api/manager/products/:id
 // body: { stock_qty?, price?, reorder_level? }
+// Quick inline edits from the stock table.
 managerRouter.patch('/products/:id', async (req, res) => {
   const { id } = req.params;
   const { stock_qty, price, reorder_level } = req.body;
