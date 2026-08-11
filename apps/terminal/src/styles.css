@@ -1832,9 +1832,7 @@ input:focus-visible {
     overflow: visible !important;
   }
 
-  /* Hide every direct child of the app shell, but keep the shell itself. */
-  #root > *,
-  .app > *,
+ /* Hide the app's siblings of the receipt, never the shell itself. */
   .app__toolbar,
   .app__body,
   .top-bar,
