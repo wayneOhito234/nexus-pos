@@ -1959,4 +1959,7 @@ input:focus-visible {
   button {
     display: none !important;
   }
+  .receipt__logo {
+    display: none !important;
+  }
 }
