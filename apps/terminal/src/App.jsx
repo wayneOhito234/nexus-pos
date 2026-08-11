@@ -459,6 +459,7 @@ export default function App() {
           products={products}
           onClose={() => setShowManagerPanel(false)}
           onExitManagerMode={handleExitManagerMode}
+          onNotify={addToast}
         />
       )}
       {showAnalytics && <AnalyticsPanel onClose={() => setShowAnalytics(false)} />}

@@ -124,3 +124,53 @@ export async function fetchDrawerHistory() {
   if (!res.ok) throw new Error('failed to fetch drawer history');
   return res.json();
 }
+export async function fetchAllProducts() {
+  const res = await fetchWithTimeout(`${SERVER_ORIGIN}/api/manager/products`);
+  if (!res.ok) throw new Error('Could not load the product list');
+  return res.json();
+}
+
+export async function fetchNextSku() {
+  const res = await fetchWithTimeout(`${SERVER_ORIGIN}/api/manager/products/next-sku`);
+  if (!res.ok) throw new Error('Could not generate a SKU');
+  return res.json();
+}
+
+export async function fetchCategories() {
+  const res = await fetchWithTimeout(`${SERVER_ORIGIN}/api/manager/products/categories`);
+  if (!res.ok) throw new Error('Could not load categories');
+  return res.json();
+}
+
+export async function createProduct(product) {
+  const res = await fetchWithTimeout(`${SERVER_ORIGIN}/api/manager/products`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(product),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || 'Could not save the product');
+  return body;
+}
+
+export async function updateProductDetails(productId, changes) {
+  const res = await fetchWithTimeout(`${SERVER_ORIGIN}/api/manager/products/${productId}/details`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(changes),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || 'Could not save the changes');
+  return body;
+}
+
+export async function setProductActive(productId, active) {
+  const res = await fetchWithTimeout(`${SERVER_ORIGIN}/api/manager/products/${productId}/active`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ active }),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || 'Could not change the product status');
+  return body;
+}

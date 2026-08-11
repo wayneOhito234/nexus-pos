@@ -1,3 +1,4 @@
+import { ProductManager } from './ProductManager.jsx';
 import { useEffect, useState } from 'react';
 import { fetchCashiers, clockIn, clockOut, adjustProduct, registerCashier } from '../api/managerClient.js';
 import { getTerminalId } from '../terminalId.js';
@@ -123,7 +124,7 @@ function CreateCashierForm({ onCreated }) {
   );
 }
 
-export function ManagerPanel({ products, onClose, onExitManagerMode }) {
+export function ManagerPanel({ products, onClose, onExitManagerMode, onNotify }) {
   const [tab, setTab] = useState('stock');
   const [cashiers, setCashiers] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -210,6 +211,12 @@ export function ManagerPanel({ products, onClose, onExitManagerMode }) {
           >
             Create Cashier
           </button>
+          <button
+            className={tab === 'catalogue' ? 'manager-tab manager-tab--active' : 'manager-tab'}
+            onClick={() => setTab('catalogue')}
+          >
+            Products
+          </button>
         </div>
 
         {message && <p className="manager-panel__message">{message}</p>}
@@ -274,6 +281,8 @@ export function ManagerPanel({ products, onClose, onExitManagerMode }) {
             />
           </div>
         )}
+
+        {tab === 'catalogue' && <ProductManager onNotify={onNotify} />}
 
         <button className="manager-panel__close" onClick={onClose}>
           Close Panel

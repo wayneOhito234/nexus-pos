@@ -80,7 +80,7 @@ export function Login({ onLoggedIn }) {
           <span className="login-card__logo-dot" />
           <h1 className="login-card__title">NEXUS POS</h1>
         </div>
-        <p className="login-card__subtitle">Exit Mart &middot; Westlands</p>
+        <p className="login-card__subtitle">Zummart Supermarket &middot; Pangani</p>
 
         {!selected ? (
           <>
