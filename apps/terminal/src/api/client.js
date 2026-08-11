@@ -8,14 +8,49 @@ export async function loadServerOrigin() {
   return SERVER_ORIGIN;
 }
 
+// Wraps fetch with a timeout so a wrong or unreachable server address fails
+// with a clear message instead of hanging the UI indefinitely.
+export async function fetchWithTimeout(url, options = {}, timeoutMs = 6000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      throw new Error(`No response from ${SERVER_ORIGIN} after ${timeoutMs / 1000}s`);
+    }
+    throw new Error(`Cannot reach ${SERVER_ORIGIN}`);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Quick reachability check, used by the setup screen before saving an address.
+export async function testServerConnection(origin, timeoutMs = 5000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(`${origin}/health`, { signal: controller.signal });
+    if (!res.ok) return { ok: false, message: `Server responded ${res.status}` };
+    return { ok: true };
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      return { ok: false, message: `No response after ${timeoutMs / 1000}s` };
+    }
+    return { ok: false, message: 'Could not connect' };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export async function fetchProducts() {
-  const res = await fetch(`${SERVER_ORIGIN}/api/products`);
-  if (!res.ok) throw new Error('failed to fetch products');
+  const res = await fetchWithTimeout(`${SERVER_ORIGIN}/api/products`);
+  if (!res.ok) throw new Error(`Server responded ${res.status} when fetching products`);
   return res.json();
 }
 
 export async function postSale(payload) {
-  const res = await fetch(`${SERVER_ORIGIN}/api/sales`, {
+  const res = await fetchWithTimeout(`${SERVER_ORIGIN}/api/sales`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -26,7 +61,7 @@ export async function postSale(payload) {
 }
 
 export async function initiateStkPush({ phone, amount, terminal_id }) {
-  const res = await fetch(`${SERVER_ORIGIN}/api/mpesa/stkpush`, {
+  const res = await fetchWithTimeout(`${SERVER_ORIGIN}/api/mpesa/stkpush`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ phone, amount, terminal_id }),
@@ -37,7 +72,7 @@ export async function initiateStkPush({ phone, amount, terminal_id }) {
 }
 
 export async function checkPaymentStatus(checkoutRequestId) {
-  const res = await fetch(`${SERVER_ORIGIN}/api/mpesa/status/${checkoutRequestId}`);
+  const res = await fetchWithTimeout(`${SERVER_ORIGIN}/api/mpesa/status/${checkoutRequestId}`);
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(body.error || 'status check failed');
   return body;

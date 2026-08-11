@@ -4,6 +4,7 @@ import cors from 'cors';
 import { createServer } from 'node:http';
 import { Server } from 'socket.io';
 import { pool } from './db.js';
+import { ipAllowlist, mpesaCallbackAllowlist } from './ipAllowlist.js';
 import { productsRouter } from './routes/products.js';
 import { salesRouter } from './routes/sales.js';
 import { mpesaRouter } from './routes/mpesa.js';
@@ -17,11 +18,24 @@ const io = new Server(httpServer, {
 });
 
 app.set('io', io);
+app.set('trust proxy', true);
 app.use(cors());
 app.use(express.json());
 
+// Left unprotected on purpose so the server can always be reached for a
+// liveness check from any machine while troubleshooting.
 app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
+});
+
+// The M-Pesa callback arrives from Safaricom, not the store LAN, so it gets
+// its own allowlist rather than being left open.
+app.use('/api/mpesa/callback', mpesaCallbackAllowlist);
+
+// Everything else is restricted to the store's own till and manager machines.
+app.use((req, res, next) => {
+  if (req.path.startsWith('/api/mpesa/callback')) return next();
+  return ipAllowlist(req, res, next);
 });
 
 app.use('/api/products', productsRouter);

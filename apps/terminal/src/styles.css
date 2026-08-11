@@ -1738,3 +1738,141 @@ input:focus-visible {
   border: none !important;
   font-weight: 700 !important;
 }
+/* ---------- Receipt, screen ---------- */
+.receipt__logo {
+  display: block;
+  max-width: 150px;
+  margin: 0 auto 10px;
+}
+
+.receipt__store {
+  text-align: center;
+  font-weight: 700;
+  font-size: 1rem;
+  margin: 0 0 4px;
+}
+
+.receipt__address {
+  text-align: center;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  margin: 0 0 8px;
+}
+
+.receipt__line-name {
+  flex: 1;
+  text-align: left;
+}
+
+.receipt__line-unit {
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+}
+
+.receipt__payment .receipt__line {
+  font-size: 0.82rem;
+}
+
+.receipt__tagline {
+  font-size: 0.72rem;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+
+.receipt__actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.receipt__print,
+.receipt__close {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 12px;
+  border-radius: var(--radius-md);
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-3);
+  color: var(--text-primary);
+}
+
+.receipt__close {
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  color: var(--surface-1);
+  border: none;
+}
+
+/* ---------- Receipt, print ---------- */
+@media print {
+  @page {
+    size: 80mm auto;
+    margin: 0;
+  }
+
+  body * {
+    visibility: hidden;
+  }
+
+  #printable-receipt,
+  #printable-receipt * {
+    visibility: visible;
+  }
+
+  #printable-receipt {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 72mm;
+    padding: 4mm;
+    margin: 0;
+    background: #fff !important;
+    color: #000 !important;
+    border: none !important;
+    box-shadow: none !important;
+    border-radius: 0 !important;
+    font-family: ui-monospace, "Courier New", monospace;
+    font-size: 10pt;
+    line-height: 1.4;
+  }
+
+  #printable-receipt * {
+    color: #000 !important;
+    background: transparent !important;
+  }
+
+  #printable-receipt hr {
+    border: none;
+    border-top: 1px dashed #000;
+    margin: 6px 0;
+  }
+
+  #printable-receipt .receipt__logo {
+    max-width: 45mm;
+    filter: grayscale(100%) contrast(200%);
+  }
+
+  /* Buttons and the dimmed overlay have no business on paper. */
+  #printable-receipt .receipt__actions,
+  .receipt-overlay {
+    display: none !important;
+  }
+
+  #printable-receipt .receipt__line {
+    display: flex;
+    justify-content: space-between;
+    gap: 4mm;
+  }
+
+  #printable-receipt .receipt__line--total {
+    font-weight: 700;
+    font-size: 11pt;
+  }
+}

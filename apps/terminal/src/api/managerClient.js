@@ -1,13 +1,13 @@
-import { SERVER_ORIGIN } from './client.js';
+import { SERVER_ORIGIN, fetchWithTimeout } from './client.js';
 
 export async function fetchCashiers() {
-  const res = await fetch(`${SERVER_ORIGIN}/api/manager/cashiers`);
-  if (!res.ok) throw new Error('failed to fetch cashiers');
+  const res = await fetchWithTimeout(`${SERVER_ORIGIN}/api/manager/cashiers`);
+  if (!res.ok) throw new Error(`Server responded ${res.status} from ${SERVER_ORIGIN}`);
   return res.json();
 }
 
 export async function clockIn(cashier_id, terminal_id) {
-  const res = await fetch(`${SERVER_ORIGIN}/api/manager/shifts/clock-in`, {
+  const res = await fetchWithTimeout(`${SERVER_ORIGIN}/api/manager/shifts/clock-in`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ cashier_id, terminal_id }),
@@ -18,7 +18,7 @@ export async function clockIn(cashier_id, terminal_id) {
 }
 
 export async function clockOut(cashier_id) {
-  const res = await fetch(`${SERVER_ORIGIN}/api/manager/shifts/clock-out`, {
+  const res = await fetchWithTimeout(`${SERVER_ORIGIN}/api/manager/shifts/clock-out`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ cashier_id }),
@@ -28,11 +28,11 @@ export async function clockOut(cashier_id) {
   return body;
 }
 
-export async function adjustProduct(productId, { stock_qty, price }) {
-  const res = await fetch(`${SERVER_ORIGIN}/api/manager/products/${productId}`, {
+export async function adjustProduct(productId, { stock_qty, price, reorder_level }) {
+  const res = await fetchWithTimeout(`${SERVER_ORIGIN}/api/manager/products/${productId}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ stock_qty, price }),
+    body: JSON.stringify({ stock_qty, price, reorder_level }),
   });
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(body.error || 'adjustment failed');
@@ -40,7 +40,7 @@ export async function adjustProduct(productId, { stock_qty, price }) {
 }
 
 export async function registerCashier({ first_name, last_name, password, role }) {
-  const res = await fetch(`${SERVER_ORIGIN}/api/manager/cashiers/register`, {
+  const res = await fetchWithTimeout(`${SERVER_ORIGIN}/api/manager/cashiers/register`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ first_name, last_name, password, role }),
@@ -51,7 +51,7 @@ export async function registerCashier({ first_name, last_name, password, role })
 }
 
 export async function loginCashier({ first_name, last_name, password, terminal_id }) {
-  const res = await fetch(`${SERVER_ORIGIN}/api/manager/cashiers/login`, {
+  const res = await fetchWithTimeout(`${SERVER_ORIGIN}/api/manager/cashiers/login`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ first_name, last_name, password, terminal_id }),
@@ -62,13 +62,13 @@ export async function loginCashier({ first_name, last_name, password, terminal_i
 }
 
 export async function fetchAnalyticsSummary() {
-  const res = await fetch(`${SERVER_ORIGIN}/api/analytics/summary`);
+  const res = await fetchWithTimeout(`${SERVER_ORIGIN}/api/analytics/summary`);
   if (!res.ok) throw new Error('failed to fetch analytics');
   return res.json();
 }
 
 export async function deleteCashier(cashierId) {
-  const res = await fetch(`${SERVER_ORIGIN}/api/manager/cashiers/${cashierId}`, {
+  const res = await fetchWithTimeout(`${SERVER_ORIGIN}/api/manager/cashiers/${cashierId}`, {
     method: 'DELETE',
   });
   const body = await res.json().catch(() => ({}));
@@ -77,19 +77,19 @@ export async function deleteCashier(cashierId) {
 }
 
 export async function fetchShiftHistory() {
-  const res = await fetch(`${SERVER_ORIGIN}/api/manager/shifts/history`);
+  const res = await fetchWithTimeout(`${SERVER_ORIGIN}/api/manager/shifts/history`);
   if (!res.ok) throw new Error('failed to fetch shift history');
   return res.json();
 }
 
 export async function fetchSalesHistory() {
-  const res = await fetch(`${SERVER_ORIGIN}/api/manager/sales/history`);
+  const res = await fetchWithTimeout(`${SERVER_ORIGIN}/api/manager/sales/history`);
   if (!res.ok) throw new Error('failed to fetch sales history');
   return res.json();
 }
 
 export async function updateCashierRole(cashierId, role) {
-  const res = await fetch(`${SERVER_ORIGIN}/api/manager/cashiers/${cashierId}/role`, {
+  const res = await fetchWithTimeout(`${SERVER_ORIGIN}/api/manager/cashiers/${cashierId}/role`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ role }),
@@ -100,7 +100,7 @@ export async function updateCashierRole(cashierId, role) {
 }
 
 export async function clockOutAll() {
-  const res = await fetch(`${SERVER_ORIGIN}/api/manager/shifts/clock-out-all`, {
+  const res = await fetchWithTimeout(`${SERVER_ORIGIN}/api/manager/shifts/clock-out-all`, {
     method: 'POST',
   });
   const body = await res.json().catch(() => ({}));
@@ -109,7 +109,7 @@ export async function clockOutAll() {
 }
 
 export async function openDrawer({ cashier_id, terminal_id, reason }) {
-  const res = await fetch(`${SERVER_ORIGIN}/api/manager/drawer/open`, {
+  const res = await fetchWithTimeout(`${SERVER_ORIGIN}/api/manager/drawer/open`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ cashier_id, terminal_id, reason }),
@@ -120,7 +120,7 @@ export async function openDrawer({ cashier_id, terminal_id, reason }) {
 }
 
 export async function fetchDrawerHistory() {
-  const res = await fetch(`${SERVER_ORIGIN}/api/manager/drawer/history`);
+  const res = await fetchWithTimeout(`${SERVER_ORIGIN}/api/manager/drawer/history`);
   if (!res.ok) throw new Error('failed to fetch drawer history');
   return res.json();
 }

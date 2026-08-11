@@ -3,7 +3,7 @@ MPESA NUMBER
 MPESA CONFIRMATION 
 curl -X POST http://localhost:4000/api/mpesa/demo-confirm/
 
-curl -X POST http://localhost:4000/api/manager/shifts/clock-out-all
+curl -X POST http://192.168.100.11:4000/api/manager/shifts/clock-out-all
 
 # Nexus POS — Quick Start & Troubleshooting
 

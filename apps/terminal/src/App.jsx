@@ -21,7 +21,7 @@ import { clockOut, fetchAnalyticsSummary, openDrawer } from './api/managerClient
 import { connectSocket, getSocket } from './socket.js';
 import { loadTerminalId, getTerminalId } from './terminalId.js';
 
-const BRANCH_NAME = 'Exit Mart Supermarket';
+const BRANCH_NAME = 'Zummart Supermarket';
 
 export default function App() {
   const [bootState, setBootState] = useState('checking'); // checking | needs-setup | ready
@@ -220,6 +220,9 @@ export default function App() {
   function buildReceipt(sale, paymentMethod, extra = {}) {
     return {
       saleId: sale.id,
+      localRef: sale.local_ref,
+      terminalId: getTerminalId(),
+      cashierName: cashier?.name,
       items: cart.map((item) => ({
         name: item.product.name,
         qty: item.qty,
