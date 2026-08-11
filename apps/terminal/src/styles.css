@@ -912,13 +912,26 @@ input:focus-visible {
   border-radius: var(--radius-lg);
   padding: 28px;
   width: 700px;
+  height: 85vh;
   max-height: 85vh;
-  overflow-y: auto;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
   gap: 20px;
   box-shadow: var(--shadow-lg);
   animation: modal-pop-in 0.18s var(--ease);
+}
+
+.analytics-panel {
+  height: auto;
+  overflow-y: auto;
+}
+
+.manager-panel__header,
+.manager-panel__tabs,
+.manager-panel__message,
+.manager-panel__close {
+  flex-shrink: 0;
 }
 
 .manager-panel__header {
@@ -1000,6 +1013,9 @@ input:focus-visible {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .manager-stock-row,

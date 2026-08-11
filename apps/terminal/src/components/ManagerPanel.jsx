@@ -282,7 +282,11 @@ export function ManagerPanel({ products, onClose, onExitManagerMode, onNotify })
           </div>
         )}
 
-        {tab === 'catalogue' && <ProductManager onNotify={onNotify} />}
+        {tab === 'catalogue' && (
+          <div className="manager-panel__body manager-panel__body--catalogue">
+            <ProductManager onNotify={onNotify} />
+          </div>
+        )}
 
         <button className="manager-panel__close" onClick={onClose}>
           Close Panel
@@ -291,3 +295,5 @@ export function ManagerPanel({ products, onClose, onExitManagerMode, onNotify })
     </div>
   );
 }
+
+//wayne
