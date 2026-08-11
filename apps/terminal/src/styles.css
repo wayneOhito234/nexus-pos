@@ -1809,70 +1809,136 @@ input:focus-visible {
   color: var(--surface-1);
   border: none;
 }
-
-/* ---------- Receipt, print ---------- */
+/* ============================================================
+   PRINT — 80mm thermal receipt
+   Uses display:none rather than visibility:hidden, so hidden
+   elements don't keep occupying layout space and push the
+   receipt outside the printable area.
+   ============================================================ */
 @media print {
   @page {
     size: 80mm auto;
     margin: 0;
   }
 
-  body * {
-    visibility: hidden;
-  }
-
-  #printable-receipt,
-  #printable-receipt * {
-    visibility: visible;
-  }
-
-  #printable-receipt {
-    position: absolute;
-    left: 0;
-    top: 0;
-    width: 72mm;
-    padding: 4mm;
-    margin: 0;
+  html,
+  body {
+    width: 80mm;
+    margin: 0 !important;
+    padding: 0 !important;
     background: #fff !important;
-    color: #000 !important;
-    border: none !important;
-    box-shadow: none !important;
-    border-radius: 0 !important;
-    font-family: ui-monospace, "Courier New", monospace;
-    font-size: 10pt;
-    line-height: 1.4;
   }
 
-  #printable-receipt * {
-    color: #000 !important;
-    background: transparent !important;
-  }
-
-  #printable-receipt hr {
-    border: none;
-    border-top: 1px dashed #000;
-    margin: 6px 0;
-  }
-
-  #printable-receipt .receipt__logo {
-    max-width: 45mm;
-    filter: grayscale(100%) contrast(200%);
-  }
-
-  /* Buttons and the dimmed overlay have no business on paper. */
-  #printable-receipt .receipt__actions,
-  .receipt-overlay {
+  /* Hide the whole app, then bring back only the receipt. */
+  body > * {
     display: none !important;
   }
 
-  #printable-receipt .receipt__line {
-    display: flex;
-    justify-content: space-between;
-    gap: 4mm;
+  .receipt-overlay {
+    display: block !important;
+    position: static !important;
+    background: none !important;
+    padding: 0 !important;
+    inset: auto !important;
+    backdrop-filter: none !important;
   }
 
-  #printable-receipt .receipt__line--total {
-    font-weight: 700;
-    font-size: 11pt;
+  .receipt {
+    display: block !important;
+    position: static !important;
+    width: 72mm !important;
+    max-width: 72mm !important;
+    margin: 0 !important;
+    padding: 3mm !important;
+    background: #fff !important;
+    color: #000 !important;
+    border: none !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+    font-family: "Courier New", ui-monospace, monospace !important;
+    font-size: 10pt !important;
+    line-height: 1.35 !important;
+    animation: none !important;
+  }
+
+  .receipt * {
+    color: #000 !important;
+    background: transparent !important;
+    box-shadow: none !important;
+  }
+
+  .receipt hr {
+    border: none !important;
+    border-top: 1px dashed #000 !important;
+    margin: 2mm 0 !important;
+  }
+
+  .receipt__logo {
+    display: block !important;
+    max-width: 40mm !important;
+    margin: 0 auto 2mm !important;
+    filter: grayscale(100%) contrast(180%);
+  }
+
+  .receipt__store {
+    text-align: center !important;
+    font-weight: 700 !important;
+    font-size: 11pt !important;
+    margin: 0 0 1mm !important;
+  }
+
+  .receipt__address,
+  .receipt__meta {
+    text-align: center !important;
+    font-size: 8pt !important;
+    line-height: 1.4 !important;
+    margin: 0 0 1mm !important;
+  }
+
+  .receipt__line {
+    display: flex !important;
+    justify-content: space-between !important;
+    gap: 3mm !important;
+    margin-bottom: 1mm !important;
+  }
+
+  .receipt__line-name {
+    flex: 1 !important;
+    text-align: left !important;
+  }
+
+  .receipt__line-unit {
+    font-size: 8pt !important;
+  }
+
+  .receipt__line--total {
+    font-weight: 700 !important;
+    font-size: 12pt !important;
+    margin-top: 1mm !important;
+  }
+
+  .receipt__thanks {
+    text-align: center !important;
+    margin: 3mm 0 0 !important;
+    font-size: 9pt !important;
+  }
+
+  .receipt__tagline {
+    font-size: 7pt !important;
+    letter-spacing: 1px !important;
+  }
+
+  /* Nothing interactive belongs on paper. */
+  .receipt__actions,
+  .receipt button,
+  button {
+    display: none !important;
+  }
+
+  /* Blank space after the last line so the cut doesn't clip the text. */
+  .receipt::after {
+    content: "";
+    display: block;
+    height: 8mm;
   }
 }
