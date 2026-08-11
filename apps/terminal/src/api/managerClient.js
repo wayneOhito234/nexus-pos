@@ -124,6 +124,9 @@ export async function fetchDrawerHistory() {
   if (!res.ok) throw new Error('failed to fetch drawer history');
   return res.json();
 }
+
+// ---------- Product catalogue ----------
+
 export async function fetchAllProducts() {
   const res = await fetchWithTimeout(`${SERVER_ORIGIN}/api/manager/products`);
   if (!res.ok) throw new Error('Could not load the product list');

@@ -2237,6 +2237,13 @@ input:focus-visible {
     grid-template-columns: 1fr;
   }
 }
+.manager-panel__body--catalogue {
+  padding: 0;
+  overflow: hidden;
+  min-height: 0;
+  height: 60vh;
+  display: block;
+}
 /* ============================================================
    PRINT — 80mm thermal receipt
    #root and .app must stay displayed, because hiding an ancestor
@@ -2390,4 +2397,11 @@ input:focus-visible {
   .receipt__logo {
     display: none !important;
   }
+}
+.manager-panel__body--catalogue {
+  padding: 0;
+  overflow: hidden;
+  min-height: 0;
+  height: 60vh;
+  display: block;
 }
