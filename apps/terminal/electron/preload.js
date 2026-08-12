@@ -22,3 +22,15 @@ contextBridge.exposeInMainWorld('nexusSales', {
   markSynced: (localSaleId, serverId) => ipcRenderer.invoke('sales:mark-synced', localSaleId, serverId),
   pendingCount: () => ipcRenderer.invoke('sales:pending-count'),
 });
+
+// ── VFD customer display ──────────────────────────────────────────────────────
+contextBridge.exposeInMainWorld('nexusVfd', {
+  itemAdded:    (productName, unitPrice, cartTotal) =>
+    ipcRenderer.invoke('vfd:item-added', { productName, unitPrice, cartTotal }),
+  checkout:     (total, paymentMethod) =>
+    ipcRenderer.invoke('vfd:checkout', { total, paymentMethod }),
+  saleComplete: (changeGiven, paymentMethod) =>
+    ipcRenderer.invoke('vfd:sale-complete', { changeGiven, paymentMethod }),
+  welcome:      () => ipcRenderer.invoke('vfd:welcome'),
+  clear:        () => ipcRenderer.invoke('vfd:clear'),
+});

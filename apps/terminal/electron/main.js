@@ -1,9 +1,11 @@
-const path = require('node:path');
-const fs = require('node:fs');
+const path    = require('node:path');
+const fs      = require('node:fs');
 const { app, BrowserWindow, ipcMain, Menu } = require('electron');
 const { initDb, getCachedProducts, setCachedProducts, saveSaleLocally, getPendingSales, markSaleSynced, getPendingSyncCount } = require('./db');
 const { readConfig, writeConfig, isConfigured } = require('./config');
+const { vfdOpen, vfdClose, vfdWelcome, vfdItemAdded, vfdCheckout, vfdSaleComplete, vfdClear } = require('./vfd');
 
+// ── Boot logger ───────────────────────────────────────────────────────────────
 const logFile = path.join(__dirname, 'boot-debug.log');
 function log(msg) {
   fs.appendFileSync(logFile, `${new Date().toISOString()} ${msg}\n`);
@@ -11,8 +13,10 @@ function log(msg) {
 
 log('1: requires done');
 
+// ── Change 'COM3' to your actual VFD COM port from Device Manager ─────────────
+const VFD_COM_PORT = 'COM3';
+
 Menu.setApplicationMenu(null);
-app.disableHardwareAcceleration();
 log('2: menu set to null');
 
 let currentCashierId = null;
@@ -61,7 +65,7 @@ function createWindow() {
   win.webContents.on('did-fail-load', (_e, code, desc) => log(`did-fail-load: ${code} ${desc}`));
   win.webContents.on('render-process-gone', (_e, details) => log(`render-process-gone: ${JSON.stringify(details)}`));
 
-  if (process.env.NODE_ENV !== 'development') {
+  if (process.env.NODE_ENV === 'production') {
     log('loading production build from dist/index.html');
     win.loadFile(path.join(__dirname, '../dist/index.html'));
   } else {
@@ -73,20 +77,35 @@ function createWindow() {
 
 log('3: about to register ipcMain handlers');
 
-ipcMain.handle('cache:get-products', () => getCachedProducts());
-ipcMain.handle('cache:set-products', (_event, products) => setCachedProducts(products));
-ipcMain.handle('sales:save-local', (_event, sale) => saveSaleLocally(sale));
-ipcMain.handle('sales:get-pending', () => getPendingSales());
-ipcMain.handle('sales:mark-synced', (_event, localSaleId, serverId) => markSaleSynced(localSaleId, serverId));
-ipcMain.handle('sales:pending-count', () => getPendingSyncCount());
-ipcMain.handle('session:set-cashier', (_event, cashierId) => { currentCashierId = cashierId; });
-ipcMain.handle('session:clear-cashier', () => { currentCashierId = null; });
-ipcMain.handle('config:read', () => readConfig());
-ipcMain.handle('config:write', (_event, config) => writeConfig(config));
-ipcMain.handle('config:is-configured', () => isConfigured());
+// ── Original IPC handlers ─────────────────────────────────────────────────────
+ipcMain.handle('cache:get-products',    ()                            => getCachedProducts());
+ipcMain.handle('cache:set-products',    (_event, products)            => setCachedProducts(products));
+ipcMain.handle('sales:save-local',      (_event, sale)                => saveSaleLocally(sale));
+ipcMain.handle('sales:get-pending',     ()                            => getPendingSales());
+ipcMain.handle('sales:mark-synced',     (_event, localSaleId, serverId) => markSaleSynced(localSaleId, serverId));
+ipcMain.handle('sales:pending-count',   ()                            => getPendingSyncCount());
+ipcMain.handle('session:set-cashier',   (_event, cashierId)           => { currentCashierId = cashierId; });
+ipcMain.handle('session:clear-cashier', ()                            => { currentCashierId = null; });
+ipcMain.handle('config:read',           ()                            => readConfig());
+ipcMain.handle('config:write',          (_event, config)              => writeConfig(config));
+ipcMain.handle('config:is-configured',  ()                            => isConfigured());
+
+// ── VFD IPC handlers ──────────────────────────────────────────────────────────
+ipcMain.handle('vfd:item-added',    (_event, { productName, unitPrice, cartTotal }) => {
+  vfdItemAdded(productName, unitPrice, cartTotal);
+});
+ipcMain.handle('vfd:checkout',      (_event, { total, paymentMethod }) => {
+  vfdCheckout(total, paymentMethod);
+});
+ipcMain.handle('vfd:sale-complete', (_event, { changeGiven, paymentMethod }) => {
+  vfdSaleComplete(changeGiven, paymentMethod);
+});
+ipcMain.handle('vfd:welcome', () => vfdWelcome());
+ipcMain.handle('vfd:clear',   () => vfdClear());
 
 log('4: ipcMain handlers registered');
 
+// ── App lifecycle ─────────────────────────────────────────────────────────────
 app.whenReady().then(async () => {
   log('5: app ready, initialising local database');
   try {
@@ -95,6 +114,10 @@ app.whenReady().then(async () => {
   } catch (err) {
     log(`local database init failed: ${err.message}`);
   }
+
+  // Open VFD display (silently skips if port not available)
+  vfdOpen(VFD_COM_PORT);
+
   createWindow();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -108,6 +131,7 @@ app.on('window-all-closed', () => {
 });
 
 app.on('before-quit', async (event) => {
+  vfdClose();
   if (!currentCashierId) return;
   event.preventDefault();
   await clockOutCurrentCashier();
