@@ -1,12 +1,18 @@
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import { pool } from '../db.js';
+import { managerIpGuard } from '../managerIpGuard.js';
 import { checkLowStockAndAlert } from '../whatsapp.js';
 
 export const managerRouter = Router();
 
+// ============================================================
+// Staff and sign-in
+// ============================================================
+
 // GET /api/manager/cashiers
-// List all cashiers, with their current shift (if clocked in) included.
+// Used by the till login screen. Deliberately returns cashiers only, so
+// manager and admin accounts never appear on a till.
 managerRouter.get('/cashiers', async (req, res) => {
   const { rows } = await pool.query(`
     SELECT
@@ -14,14 +20,31 @@ managerRouter.get('/cashiers', async (req, res) => {
       s.id AS shift_id, s.terminal_id, s.clock_in
     FROM cashiers c
     LEFT JOIN shifts s ON s.cashier_id = c.id AND s.clock_out IS NULL
+    WHERE c.role = 'cashier'
     ORDER BY c.name
+  `);
+  res.json(rows);
+});
+
+// GET /api/manager/staff
+// Everyone, for the manager app's own screens. Manager PC only.
+managerRouter.get('/staff', managerIpGuard, async (req, res) => {
+  const { rows } = await pool.query(`
+    SELECT
+      c.id, c.name, c.first_name, c.last_name, c.role,
+      s.id AS shift_id, s.terminal_id, s.clock_in
+    FROM cashiers c
+    LEFT JOIN shifts s ON s.cashier_id = c.id AND s.clock_out IS NULL
+    ORDER BY
+      CASE c.role WHEN 'admin' THEN 0 WHEN 'manager' THEN 1 ELSE 2 END,
+      c.name
   `);
   res.json(rows);
 });
 
 // POST /api/manager/cashiers/register
 // body: { first_name, last_name, password, role? }
-managerRouter.post('/cashiers/register', async (req, res) => {
+managerRouter.post('/cashiers/register', managerIpGuard, async (req, res) => {
   const { first_name, last_name, password, role } = req.body;
 
   if (!first_name || !last_name || !password) {
@@ -55,6 +78,8 @@ managerRouter.post('/cashiers/register', async (req, res) => {
 
 // POST /api/manager/cashiers/login
 // body: { first_name, last_name, password, terminal_id }
+// Till sign-in. Refuses manager and admin accounts outright, so hiding them
+// from the login screen is presentation and this is the actual rule.
 managerRouter.post('/cashiers/login', async (req, res) => {
   const { first_name, last_name, password, terminal_id } = req.body;
 
@@ -69,12 +94,18 @@ managerRouter.post('/cashiers/login', async (req, res) => {
   const cashier = rows[0];
 
   if (!cashier || !cashier.password_hash) {
-    return res.status(401).json({ error: 'invalid name or password' });
+    return res.status(401).json({ error: 'Wrong name or password' });
   }
 
   const valid = await bcrypt.compare(password, cashier.password_hash);
   if (!valid) {
-    return res.status(401).json({ error: 'invalid name or password' });
+    return res.status(401).json({ error: 'Wrong name or password' });
+  }
+
+  if (cashier.role !== 'cashier') {
+    return res.status(403).json({
+      error: 'Manager accounts sign in on the manager terminal, not a till.',
+    });
   }
 
   const { rows: openShift } = await pool.query(
@@ -101,8 +132,41 @@ managerRouter.post('/cashiers/login', async (req, res) => {
   res.json({ id: cashier.id, name: cashier.name, role: cashier.role });
 });
 
+// POST /api/manager/staff/login
+// body: { first_name, last_name, password }
+// The manager app's sign-in. No shift is opened, because a manager isn't
+// occupying a till.
+managerRouter.post('/staff/login', managerIpGuard, async (req, res) => {
+  const { first_name, last_name, password } = req.body;
+
+  if (!first_name || !last_name || !password) {
+    return res.status(400).json({ error: 'first_name, last_name and password are required' });
+  }
+
+  const { rows } = await pool.query(
+    'SELECT * FROM cashiers WHERE first_name = $1 AND last_name = $2',
+    [first_name, last_name]
+  );
+  const staff = rows[0];
+
+  if (!staff || !staff.password_hash) {
+    return res.status(401).json({ error: 'Wrong name or password' });
+  }
+
+  const valid = await bcrypt.compare(password, staff.password_hash);
+  if (!valid) {
+    return res.status(401).json({ error: 'Wrong name or password' });
+  }
+
+  if (staff.role === 'cashier') {
+    return res.status(403).json({ error: 'Cashier accounts sign in at a till, not here.' });
+  }
+
+  res.json({ id: staff.id, name: staff.name, role: staff.role });
+});
+
 // DELETE /api/manager/cashiers/:id
-managerRouter.delete('/cashiers/:id', async (req, res) => {
+managerRouter.delete('/cashiers/:id', managerIpGuard, async (req, res) => {
   const { id } = req.params;
 
   const { rows: openShift } = await pool.query(
@@ -125,7 +189,7 @@ managerRouter.delete('/cashiers/:id', async (req, res) => {
 
 // PATCH /api/manager/cashiers/:id/role
 // The 'admin' role is intentionally never assignable through this endpoint.
-managerRouter.patch('/cashiers/:id/role', async (req, res) => {
+managerRouter.patch('/cashiers/:id/role', managerIpGuard, async (req, res) => {
   const { id } = req.params;
   const { role } = req.body;
 
@@ -144,6 +208,10 @@ managerRouter.patch('/cashiers/:id/role', async (req, res) => {
 
   res.json(rows[0]);
 });
+
+// ============================================================
+// Shifts
+// ============================================================
 
 // POST /api/manager/shifts/clock-in
 managerRouter.post('/shifts/clock-in', async (req, res) => {
@@ -206,7 +274,7 @@ managerRouter.post('/shifts/clock-out-all', async (req, res) => {
 });
 
 // GET /api/manager/shifts/history
-managerRouter.get('/shifts/history', async (req, res) => {
+managerRouter.get('/shifts/history', managerIpGuard, async (req, res) => {
   const { rows } = await pool.query(`
     SELECT s.id, c.name, c.role, s.terminal_id, s.clock_in, s.clock_out
     FROM shifts s
@@ -217,8 +285,12 @@ managerRouter.get('/shifts/history', async (req, res) => {
   res.json(rows);
 });
 
+// ============================================================
+// Sales and drawer
+// ============================================================
+
 // GET /api/manager/sales/history
-managerRouter.get('/sales/history', async (req, res) => {
+managerRouter.get('/sales/history', managerIpGuard, async (req, res) => {
   const { rows } = await pool.query(`
     SELECT id, terminal_id, payment_method, total, mpesa_ref, created_at
     FROM sales
@@ -245,7 +317,7 @@ managerRouter.post('/drawer/open', async (req, res) => {
 });
 
 // GET /api/manager/drawer/history
-managerRouter.get('/drawer/history', async (req, res) => {
+managerRouter.get('/drawer/history', managerIpGuard, async (req, res) => {
   const { rows } = await pool.query(`
     SELECT d.id, d.terminal_id, d.reason, d.created_at, c.name AS cashier_name
     FROM drawer_events d
@@ -262,7 +334,7 @@ managerRouter.get('/drawer/history', async (req, res) => {
 
 // GET /api/manager/products
 // Full catalogue including inactive items, which the till never sees.
-managerRouter.get('/products', async (req, res) => {
+managerRouter.get('/products', managerIpGuard, async (req, res) => {
   const { rows } = await pool.query(`
     SELECT id, sku, barcode, name, category, price, cost_price, stock_qty,
            reorder_level, active, created_at
@@ -273,9 +345,7 @@ managerRouter.get('/products', async (req, res) => {
 });
 
 // GET /api/manager/products/next-sku
-// Suggests the next SKU so the form can prefill it. The manager can still
-// overwrite it before saving.
-managerRouter.get('/products/next-sku', async (req, res) => {
+managerRouter.get('/products/next-sku', managerIpGuard, async (req, res) => {
   const { rows } = await pool.query(`
     SELECT sku FROM products
     WHERE sku ~ '^PRD-[0-9]+$'
@@ -288,9 +358,7 @@ managerRouter.get('/products/next-sku', async (req, res) => {
 });
 
 // GET /api/manager/products/categories
-// Existing categories, so the form can offer them rather than relying on
-// the manager to retype them consistently.
-managerRouter.get('/products/categories', async (req, res) => {
+managerRouter.get('/products/categories', managerIpGuard, async (req, res) => {
   const { rows } = await pool.query(
     'SELECT DISTINCT category FROM products WHERE category IS NOT NULL ORDER BY category'
   );
@@ -299,7 +367,7 @@ managerRouter.get('/products/categories', async (req, res) => {
 
 // POST /api/manager/products
 // body: { sku, barcode, name, category, price, cost_price?, stock_qty?, reorder_level? }
-managerRouter.post('/products', async (req, res) => {
+managerRouter.post('/products', managerIpGuard, async (req, res) => {
   const { sku, barcode, name, category, price, cost_price, stock_qty, reorder_level } = req.body;
 
   if (!sku || !barcode || !name || !category || price === undefined) {
@@ -341,9 +409,7 @@ managerRouter.post('/products', async (req, res) => {
 });
 
 // PATCH /api/manager/products/:id/details
-// Editing the descriptive fields. Stock and price quick-edits stay on the
-// plain PATCH route below.
-managerRouter.patch('/products/:id/details', async (req, res) => {
+managerRouter.patch('/products/:id/details', managerIpGuard, async (req, res) => {
   const { id } = req.params;
   const { sku, barcode, name, category, price, cost_price, reorder_level } = req.body;
 
@@ -402,7 +468,7 @@ managerRouter.patch('/products/:id/details', async (req, res) => {
 // body: { active }
 // Soft delete. The product vanishes from the till but stays intact in sales
 // history, so old receipts and reports don't break.
-managerRouter.patch('/products/:id/active', async (req, res) => {
+managerRouter.patch('/products/:id/active', managerIpGuard, async (req, res) => {
   const { id } = req.params;
   const { active } = req.body;
 
@@ -428,7 +494,8 @@ managerRouter.patch('/products/:id/active', async (req, res) => {
 
 // PATCH /api/manager/products/:id
 // body: { stock_qty?, price?, reorder_level? }
-// Quick inline edits from the stock table.
+// Quick inline edits. Left unguarded so a till's own stock corrections keep
+// working; the manager app uses the routes above.
 managerRouter.patch('/products/:id', async (req, res) => {
   const { id } = req.params;
   const { stock_qty, price, reorder_level } = req.body;
@@ -472,3 +539,4 @@ managerRouter.patch('/products/:id', async (req, res) => {
 
   res.json(rows[0]);
 });
+

@@ -1,3 +1,62 @@
+Run this commands 
+curl.exe -X POST http://192.168.100.11:4000/api/inventory/suppliers -H "Content-Type: application/json" -d "{\"name\":\"Brookside Dairy\",\"phone\":\"0722000000\"}"
+
+psql -U postgres -d nexus_pos -f - <<'SQL'
+ALTER TABLE products ADD COLUMN IF NOT EXISTS store_qty INTEGER NOT NULL DEFAULT 0;
+
+CREATE TABLE IF NOT EXISTS suppliers (
+  id SERIAL PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  contact_person TEXT,
+  phone TEXT,
+  email TEXT,
+  notes TEXT,
+  active BOOLEAN NOT NULL DEFAULT true,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS goods_received (
+  id SERIAL PRIMARY KEY,
+  supplier_id INTEGER NOT NULL REFERENCES suppliers(id),
+  reference TEXT,
+  total_cost NUMERIC(12,2) NOT NULL DEFAULT 0,
+  amount_paid NUMERIC(12,2) NOT NULL DEFAULT 0,
+  notes TEXT,
+  received_by INTEGER REFERENCES cashiers(id),
+  received_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS goods_received_items (
+  id SERIAL PRIMARY KEY,
+  goods_received_id INTEGER NOT NULL REFERENCES goods_received(id) ON DELETE CASCADE,
+  product_id INTEGER NOT NULL REFERENCES products(id),
+  qty INTEGER NOT NULL,
+  unit_cost NUMERIC(10,2) NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS stock_movements (
+  id SERIAL PRIMARY KEY,
+  product_id INTEGER NOT NULL REFERENCES products(id),
+  movement_type TEXT NOT NULL,
+  qty_change INTEGER NOT NULL,
+  location TEXT NOT NULL,
+  reason TEXT,
+  reference_id INTEGER,
+  staff_id INTEGER REFERENCES cashiers(id),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_movements_product ON stock_movements(product_id);
+CREATE INDEX IF NOT EXISTS idx_movements_created ON stock_movements(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_received_supplier ON goods_received(supplier_id);
+SQL
+
+curl.exe http://192.168.100.11:4000/api/inventory/suppliers
+Test-Path .\apps\server\src\managerIpGuard.js
+
+psql -U postgres -d nexus_pos -c "ALTER TABLE products ADD COLUMN IF NOT EXISTS store_qty INTEGER NOT NULL DEFAULT 0;"
+
+
 MPESA NUMBER
 254708374149
 MPESA CONFIRMATION 

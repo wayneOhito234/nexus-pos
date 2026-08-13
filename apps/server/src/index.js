@@ -10,6 +10,7 @@ import { salesRouter } from './routes/sales.js';
 import { mpesaRouter } from './routes/mpesa.js';
 import { managerRouter } from './routes/manager.js';
 import { analyticsRouter } from './routes/analytics.js';
+import { inventoryRouter } from './routes/inventory.js';
 
 const app = express();
 const httpServer = createServer(app);
@@ -43,6 +44,7 @@ app.use('/api/sales', salesRouter);
 app.use('/api/mpesa', mpesaRouter);
 app.use('/api/manager', managerRouter);
 app.use('/api/analytics', analyticsRouter);
+app.use('/api/inventory', inventoryRouter);
 
 io.on('connection', (socket) => {
   console.log(`terminal connected: ${socket.id}`);
