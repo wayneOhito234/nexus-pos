@@ -79,6 +79,15 @@ pm2-startup install
 ```bash
 node src/seed.js
 ```
+
+```bash
+pm2 start ecosystem.config.cjs
+```
+
+```bash
+pm2 save
+```
+
 it should show "Nexus POS server listening on port 4000"
 
 
