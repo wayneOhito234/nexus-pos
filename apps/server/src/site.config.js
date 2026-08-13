@@ -20,12 +20,12 @@ export const siteConfig = {
 
   // The machine running this server. Each till's terminal.config.json
   // must point at http://<this address>:4000
-  serverIp: '192.168.100.15',
+  serverIp: '192.168.100.16',
 
   // Machines allowed to reach manager, admin and inventory functions.
   // Usually just the manager's PC.
   managerIps: [
-    '192.168.100.15',
+    '192.168.100.16',
   ],
 
   // One entry per till PC.
