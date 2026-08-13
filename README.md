@@ -106,7 +106,16 @@ when making changes on the database make sure you run
 ```bash
 pm2 restart nexus-server
 ```
-
+### production code
+```bash
+npm run build
+$env:NODE_ENV="production"
+npm start
+```
+### create a new user
+```bash 
+curl.exe -X POST http://localhost:4000/api/manager/cashiers/register -H "Content-Type: application/json" -d "{\"first_name\":\"Admin\",\"Noorcom\":\"Ohito\",\"password\":\"admin1234\",\"role\":\"manager\"}"
+```
 
 
 
