@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import { pool } from '../db.js';
-import { managerIpGuard } from '../ipAllowlist.js';
+import { managerIpGuard, tillIpGuard } from '../ipAllowlist.js';
 import { checkLowStockAndAlert } from '../whatsapp.js';
 
 export const managerRouter = Router();
@@ -11,9 +11,9 @@ export const managerRouter = Router();
 // ============================================================
 
 // GET /api/manager/cashiers
-// Used by the till login screen. Deliberately returns cashiers only, so
-// manager and admin accounts never appear on a till.
-managerRouter.get('/cashiers', async (req, res) => {
+// The till login screen. Cashiers only, so manager and admin accounts
+// never appear on a till, and till machines only.
+managerRouter.get('/cashiers', tillIpGuard, async (req, res) => {
   const { rows } = await pool.query(`
     SELECT
       c.id, c.name, c.first_name, c.last_name, c.role,
@@ -78,9 +78,9 @@ managerRouter.post('/cashiers/register', managerIpGuard, async (req, res) => {
 
 // POST /api/manager/cashiers/login
 // body: { first_name, last_name, password, terminal_id }
-// Till sign-in. Refuses manager and admin accounts outright, so hiding them
-// from the login screen is presentation and this is the actual rule.
-managerRouter.post('/cashiers/login', async (req, res) => {
+// Till sign-in. Refuses manager and admin accounts outright, so hiding
+// them from the login screen is presentation and this is the actual rule.
+managerRouter.post('/cashiers/login', tillIpGuard, async (req, res) => {
   const { first_name, last_name, password, terminal_id } = req.body;
 
   if (!first_name || !last_name || !password || !terminal_id) {
@@ -301,8 +301,9 @@ managerRouter.get('/sales/history', managerIpGuard, async (req, res) => {
 });
 
 // POST /api/manager/drawer/open
-// Logs a drawer opening that isn't tied to a sale (a "No Sale" open).
-managerRouter.post('/drawer/open', async (req, res) => {
+// A drawer opening not tied to a sale. Tills only -- there is no cash
+// drawer on the manager machine.
+managerRouter.post('/drawer/open', tillIpGuard, async (req, res) => {
   const { cashier_id, terminal_id, reason } = req.body;
   if (!terminal_id || !reason) {
     return res.status(400).json({ error: 'terminal_id and reason are required' });
@@ -337,7 +338,7 @@ managerRouter.get('/drawer/history', managerIpGuard, async (req, res) => {
 managerRouter.get('/products', managerIpGuard, async (req, res) => {
   const { rows } = await pool.query(`
     SELECT id, sku, barcode, name, category, price, cost_price, stock_qty,
-           reorder_level, active, created_at
+           store_qty, reorder_level, active, created_at
     FROM products
     ORDER BY active DESC, name
   `);
@@ -389,7 +390,7 @@ managerRouter.post('/products', managerIpGuard, async (req, res) => {
   const { rows } = await pool.query(
     `INSERT INTO products (sku, barcode, name, category, price, cost_price, stock_qty, reorder_level)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-     RETURNING id, sku, barcode, name, category, price, cost_price, stock_qty, reorder_level, active, created_at`,
+     RETURNING id, sku, barcode, name, category, price, cost_price, stock_qty, store_qty, reorder_level, active, created_at`,
     [
       sku.trim(),
       barcode.trim(),
@@ -417,10 +418,10 @@ managerRouter.patch('/products/:id/details', managerIpGuard, async (req, res) =>
   const values = [];
   let i = 1;
 
-  const maybe = (column, value) => {
-    if (value !== undefined) {
-      fields.push(`${column} = $${i++}`);
-      values.push(value);
+  const maybe = (col, val) => {
+    if (val !== undefined) {
+      fields.push(`${col} = $${i++}`);
+      values.push(val);
     }
   };
 
@@ -450,7 +451,7 @@ managerRouter.patch('/products/:id/details', managerIpGuard, async (req, res) =>
 
   const { rows } = await pool.query(
     `UPDATE products SET ${fields.join(', ')} WHERE id = $${i}
-     RETURNING id, sku, barcode, name, category, price, cost_price, stock_qty, reorder_level, active`,
+     RETURNING id, sku, barcode, name, category, price, cost_price, stock_qty, store_qty, reorder_level, active`,
     values
   );
 
@@ -466,8 +467,8 @@ managerRouter.patch('/products/:id/details', managerIpGuard, async (req, res) =>
 
 // PATCH /api/manager/products/:id/active
 // body: { active }
-// Soft delete. The product vanishes from the till but stays intact in sales
-// history, so old receipts and reports don't break.
+// Soft delete. The product vanishes from the till but stays intact in
+// sales history, so old receipts and reports don't break.
 managerRouter.patch('/products/:id/active', managerIpGuard, async (req, res) => {
   const { id } = req.params;
   const { active } = req.body;
@@ -478,7 +479,7 @@ managerRouter.patch('/products/:id/active', managerIpGuard, async (req, res) => 
 
   const { rows } = await pool.query(
     `UPDATE products SET active = $1 WHERE id = $2
-     RETURNING id, sku, barcode, name, category, price, stock_qty, reorder_level, active`,
+     RETURNING id, sku, barcode, name, category, price, stock_qty, store_qty, reorder_level, active`,
     [active, id]
   );
 
@@ -494,9 +495,9 @@ managerRouter.patch('/products/:id/active', managerIpGuard, async (req, res) => 
 
 // PATCH /api/manager/products/:id
 // body: { stock_qty?, price?, reorder_level? }
-// Quick inline edits. Left unguarded so a till's own stock corrections keep
-// working; the manager app uses the routes above.
-managerRouter.patch('/products/:id', async (req, res) => {
+// Quick inline edits. Manager-only, since price and stock changes are
+// not a cashier's job.
+managerRouter.patch('/products/:id', managerIpGuard, async (req, res) => {
   const { id } = req.params;
   const { stock_qty, price, reorder_level } = req.body;
 
@@ -524,7 +525,7 @@ managerRouter.patch('/products/:id', async (req, res) => {
 
   const { rows } = await pool.query(
     `UPDATE products SET ${fields.join(', ')} WHERE id = $${i}
-     RETURNING id, sku, barcode, name, category, price, stock_qty, reorder_level`,
+     RETURNING id, sku, barcode, name, category, price, stock_qty, store_qty, reorder_level`,
     values
   );
 
@@ -539,4 +540,3 @@ managerRouter.patch('/products/:id', async (req, res) => {
 
   res.json(rows[0]);
 });
-

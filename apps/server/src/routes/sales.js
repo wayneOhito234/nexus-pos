@@ -1,11 +1,15 @@
 import { Router } from 'express';
 import { pool } from '../db.js';
 import { VAT_RATE, SOCKET_EVENTS } from '@nexus-pos/shared';
+import { tillIpGuard } from '../ipAllowlist.js';
 import { checkLowStockAndAlert } from '../whatsapp.js';
 
 export const salesRouter = Router();
 
-salesRouter.post('/', async (req, res) => {
+// Selling is a till function. The guard is what makes "the manager cannot
+// sell" actually true -- not a hidden button, but the server refusing the
+// request outright.
+salesRouter.post('/', tillIpGuard, async (req, res) => {
   const { terminal_id, payment_method, mpesa_ref, items, amount_received } = req.body;
 
   if (!terminal_id || !payment_method || !Array.isArray(items) || items.length === 0) {
@@ -21,7 +25,7 @@ salesRouter.post('/', async (req, res) => {
 
     for (const { product_id, qty } of items) {
       const { rows } = await client.query(
-        'SELECT id, price, stock_qty FROM products WHERE id = $1 FOR UPDATE',
+        'SELECT id, name, price, stock_qty FROM products WHERE id = $1 FOR UPDATE',
         [product_id]
       );
       const product = rows[0];
@@ -29,7 +33,10 @@ salesRouter.post('/', async (req, res) => {
         throw Object.assign(new Error(`product ${product_id} not found`), { status: 400 });
       }
       if (product.stock_qty < qty) {
-        throw Object.assign(new Error(`insufficient stock for product ${product_id}`), { status: 409 });
+        throw Object.assign(
+          new Error(`Only ${product.stock_qty} of ${product.name} left on the shelf`),
+          { status: 409 }
+        );
       }
       subtotal += Number(product.price) * qty;
       lineItems.push({ product_id, qty, price: product.price });
@@ -63,12 +70,21 @@ salesRouter.post('/', async (req, res) => {
         'UPDATE products SET stock_qty = stock_qty - $1 WHERE id = $2',
         [item.qty, item.product_id]
       );
+
+      // A sale is a stock movement like any other. Without this row, the
+      // ledger would show receipts and adjustments but silently omit the
+      // largest source of stock leaving the shelf.
+      await client.query(
+        `INSERT INTO stock_movements (product_id, movement_type, qty_change, location, reason, reference_id)
+         VALUES ($1, 'sale', $2, 'shelf', $3, $4)`,
+        [item.product_id, -item.qty, `Sale #${sale.id} on ${terminal_id}`, sale.id]
+      );
     }
 
     await client.query('COMMIT');
 
     const { rows: updatedProducts } = await pool.query(
-      'SELECT id, sku, barcode, name, category, price, stock_qty, reorder_level FROM products WHERE id = ANY($1)',
+      'SELECT id, sku, barcode, name, category, price, stock_qty, store_qty, reorder_level FROM products WHERE id = ANY($1)',
       [lineItems.map((item) => item.product_id)]
     );
 

@@ -1,89 +1,105 @@
-import { siteConfig } from '../site.config.js';
+import { Router } from 'express';
+import { pool } from '../db.js';
+import { VAT_RATE, SOCKET_EVENTS } from '@nexus-pos/shared';
+import { tillIpGuard } from '../ipAllowlist.js';
+import { checkLowStockAndAlert } from '../whatsapp.js';
 
-const loopback = ['127.0.0.1', '::1', '::ffff:127.0.0.1'];
+export const salesRouter = Router();
 
-function normalise(ip) {
-  return ip.startsWith('::ffff:') ? ip.slice(7) : ip;
-}
+// Selling is a till function. The guard is what makes "the manager cannot
+// sell" actually true -- not a hidden button, but the server refusing the
+// request outright.
+salesRouter.post('/', tillIpGuard, async (req, res) => {
+  const { terminal_id, payment_method, mpesa_ref, items, amount_received } = req.body;
 
-function ipToLong(ip) {
-  return ip.split('.').reduce((acc, octet) => (acc << 8) + Number(octet), 0) >>> 0;
-}
-
-function inSubnet(ip, cidr) {
-  try {
-    const [range, bitsRaw] = cidr.split('/');
-    const bits = Number(bitsRaw);
-    const mask = bits === 0 ? 0 : (~0 << (32 - bits)) >>> 0;
-    return (ipToLong(ip) & mask) === (ipToLong(range) & mask);
-  } catch {
-    return false;
+  if (!terminal_id || !payment_method || !Array.isArray(items) || items.length === 0) {
+    return res.status(400).json({ error: 'terminal_id, payment_method and items are required' });
   }
-}
 
-function clientIp(req) {
-  return normalise(req.ip || req.socket.remoteAddress || '');
-}
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
 
-function isLocal(req) {
-  const raw = req.ip || req.socket.remoteAddress || '';
-  return loopback.includes(raw) || loopback.includes(normalise(raw));
-}
+    let subtotal = 0;
+    const lineItems = [];
 
-// Every device that may reach the API at all: tills, the manager PC,
-// and anything inside the allowed subnet.
-export function ipAllowlist(req, res, next) {
-  const known = [...siteConfig.tillIps, ...siteConfig.managerIps, siteConfig.serverIp];
+    for (const { product_id, qty } of items) {
+      const { rows } = await client.query(
+        'SELECT id, name, price, stock_qty FROM products WHERE id = $1 FOR UPDATE',
+        [product_id]
+      );
+      const product = rows[0];
+      if (!product) {
+        throw Object.assign(new Error(`product ${product_id} not found`), { status: 400 });
+      }
+      if (product.stock_qty < qty) {
+        throw Object.assign(
+          new Error(`Only ${product.stock_qty} of ${product.name} left on the shelf`),
+          { status: 409 }
+        );
+      }
+      subtotal += Number(product.price) * qty;
+      lineItems.push({ product_id, qty, price: product.price });
+    }
 
-  // Nothing configured means the restriction is off. Fails open on purpose:
-  // locking every till out over a config mistake is worse than the
-  // restriction not applying yet.
-  if (known.length === 0 && !siteConfig.allowSubnet) return next();
+    const vat = subtotal * VAT_RATE;
+    const total = subtotal + vat;
 
-  if (isLocal(req)) return next();
+    let changeGiven = null;
+    if (payment_method === 'cash' && amount_received !== undefined) {
+      if (Number(amount_received) < total) {
+        throw Object.assign(new Error('amount received is less than the total due'), { status: 400 });
+      }
+      changeGiven = Number(amount_received) - total;
+    }
 
-  const ip = clientIp(req);
+    const { rows: saleRows } = await client.query(
+      `INSERT INTO sales (terminal_id, total, payment_method, mpesa_ref, amount_received, change_given)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING id, terminal_id, total, payment_method, mpesa_ref, amount_received, change_given, created_at`,
+      [terminal_id, total, payment_method, mpesa_ref || null, amount_received || null, changeGiven]
+    );
+    const sale = saleRows[0];
 
-  if (known.includes(ip)) return next();
-  if (siteConfig.allowSubnet && inSubnet(ip, siteConfig.allowSubnet)) return next();
+    for (const item of lineItems) {
+      await client.query(
+        'INSERT INTO sale_items (sale_id, product_id, qty, price) VALUES ($1, $2, $3, $4)',
+        [sale.id, item.product_id, item.qty, item.price]
+      );
+      await client.query(
+        'UPDATE products SET stock_qty = stock_qty - $1 WHERE id = $2',
+        [item.qty, item.product_id]
+      );
 
-  console.warn(`Blocked ${ip}: ${req.method} ${req.originalUrl}`);
-  return res.status(403).json({ error: 'This device is not authorised to use this system.' });
-}
+      // A sale is a stock movement like any other. Without this row, the
+      // ledger would show receipts and adjustments but silently omit the
+      // largest source of stock leaving the shelf.
+      await client.query(
+        `INSERT INTO stock_movements (product_id, movement_type, qty_change, location, reason, reference_id)
+         VALUES ($1, 'sale', $2, 'shelf', $3, $4)`,
+        [item.product_id, -item.qty, `Sale #${sale.id} on ${terminal_id}`, sale.id]
+      );
+    }
 
-// Manager, admin and inventory functions. Deliberately does NOT honour
-// allowSubnet -- a till being on the store network shouldn't grant it
-// manager access.
-export function managerIpGuard(req, res, next) {
-  if (siteConfig.managerIps.length === 0) return next();
-  if (isLocal(req)) return next();
+    await client.query('COMMIT');
 
-  const ip = clientIp(req);
-  if (siteConfig.managerIps.includes(ip)) return next();
+    const { rows: updatedProducts } = await pool.query(
+      'SELECT id, sku, barcode, name, category, price, stock_qty, store_qty, reorder_level FROM products WHERE id = ANY($1)',
+      [lineItems.map((item) => item.product_id)]
+    );
 
-  console.warn(`Manager route blocked for ${ip}: ${req.method} ${req.originalUrl}`);
-  return res.status(403).json({
-    error: 'Manager functions are only available on the manager terminal.',
-  });
-}
+    const io = req.app.get('io');
+    io.emit(SOCKET_EVENTS.STOCK_UPDATED, updatedProducts);
 
-// Safaricom's published callback origins.
-const SAFARICOM_IPS = [
-  '196.201.214.200', '196.201.214.206', '196.201.213.114',
-  '196.201.214.207', '196.201.214.208', '196.201.213.44',
-  '196.201.212.127', '196.201.212.138', '196.201.212.129',
-  '196.201.212.136', '196.201.212.74',  '196.201.212.69',
-];
+    checkLowStockAndAlert(updatedProducts).catch(() => {});
 
-export function mpesaCallbackAllowlist(req, res, next) {
-  // While tunnelling through ngrok, the request arrives from the tunnel
-  // rather than Safaricom, so IP checking is meaningless. Independent
-  // transaction verification in the callback handler covers this.
-  if (process.env.MPESA_SKIP_IP_CHECK === 'true') return next();
-
-  const ip = clientIp(req);
-  if (SAFARICOM_IPS.includes(ip)) return next();
-
-  console.warn(`Rejected M-Pesa callback from ${ip}`);
-  return res.status(403).json({ error: 'forbidden' });
-}
+    res.status(201).json({ ...sale, subtotal, vat, items: lineItems });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    const status = err.status || 500;
+    if (status === 500) console.error(err);
+    res.status(status).json({ error: err.message });
+  } finally {
+    client.release();
+  }
+});
