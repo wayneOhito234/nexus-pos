@@ -67,6 +67,36 @@ export function managerIpGuard(req, res, next) {
   });
 }
 
+// Till-only routes: cashier sign-in, selling, drawer opens.
+//
+// Two deliberate differences from the guard above. It does not allow
+// loopback, and it explicitly refuses manager machines -- otherwise the
+// manager PC could run the till app and sell, which is the exact thing
+// this separation exists to prevent. Since the manager PC and the server
+// are the same machine here, allowing loopback would defeat it entirely.
+//
+// It also ignores allowSubnet: being on the store network shouldn't turn
+// an arbitrary laptop into a till.
+export function tillIpGuard(req, res, next) {
+  if (siteConfig.tillIps.length === 0) return next();
+
+  const ip = clientIp(req);
+
+  if (siteConfig.managerIps.includes(ip)) {
+    console.warn(`Till route refused for manager machine ${ip}: ${req.originalUrl}`);
+    return res.status(403).json({
+      error: 'This is a manager terminal. Cashiers sign in at a till.',
+    });
+  }
+
+  if (siteConfig.tillIps.includes(ip)) return next();
+
+  console.warn(`Till route blocked for ${ip}: ${req.originalUrl}`);
+  return res.status(403).json({
+    error: 'This device is not registered as a till.',
+  });
+}
+
 // Safaricom's published callback origins.
 const SAFARICOM_IPS = [
   '196.201.214.200', '196.201.214.206', '196.201.213.114',
