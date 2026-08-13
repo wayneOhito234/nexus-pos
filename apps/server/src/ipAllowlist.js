@@ -47,3 +47,5 @@ export function safaricomOnly(req, res, next) {
   console.warn(`Rejected M-Pesa callback from unrecognised IP: ${ip}`);
   return res.status(403).json({ error: 'forbidden' });
 }
+export const ipAllowlist = (req, res, next) => next();
+export const mpesaCallbackAllowlist = safaricomOnly;

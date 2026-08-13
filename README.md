@@ -64,6 +64,61 @@ curl -X POST http://localhost:4000/api/mpesa/demo-confirm/
 
 curl.exe -X POST http://192.168.100.11:4000/api/manager/shifts/clock-out-all
 
+## Server Side Dependencies And Configuration  cd nexus-pos/apps/server
+ Run the following commands in cd nexus-pos/apps/server
+```bash
+npm install 
+```
+```bash
+npm install -g pm2 pm2-windows-startup
+```
+```bash
+pm2-startup install
+```
+
+```bash
+node src/seed.js
+```
+it should show "Nexus POS server listening on port 4000"
+
+
+
+### Adding the Firewall Port
+Open In PowerShell As An Adminisrator
+```bash
+netsh advfirewall firewall add rule name="Nexus POS" dir=in action=allow protocol=tcp localport=4000
+```
+
+### Create The Admin Cashier
+```bash
+curl -X POST http://localhost:4000/api/manager/cashiers/register -H "Content-Type: application/json" -d "{\"first_name\":\"Admin\",\"last_name\":\"NoorCom\",\"password\":\"admin1234\",\"role\":\"admin\"}"
+```
+Do this when the src/seed.js is listening on another port- Open a a new cmd
+
+```bash
+pm2 start src/index.js --name nexus-server
+```
+```bash
+pm2 save
+```
+
+when making changes on the database make sure you run
+```bash
+pm2 restart nexus-server
+```
+
+
+
+
+### Testing The Connection
+http://192.168.1.100:4000/api/products
+Based on the IP
+
+
+
+## Setting Up The Tills
+1. I
+
 
 # Nexus POS — Quick Start & Troubleshooting
 
