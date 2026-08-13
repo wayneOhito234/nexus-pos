@@ -30,7 +30,7 @@ export const siteConfig = {
 
   // One entry per till PC.
   tillIps: [
-    '192.168.100.29',
+    '192.168.100.16',
     // '192.168.100.30',
   ],
 
