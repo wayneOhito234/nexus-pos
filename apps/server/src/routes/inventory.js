@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { pool } from '../db.js';
-import { managerIpGuard } from '../managerIpGuard.js';
+import { managerIpGuard } from '../ipAllowlist.js';
 import { checkLowStockAndAlert } from '../whatsapp.js';
 
 export const inventoryRouter = Router();
