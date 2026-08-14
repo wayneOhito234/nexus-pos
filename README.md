@@ -107,8 +107,8 @@ it should show "Nexus POS server listening on port 4000"
 ### Adding the Firewall Port
 Open In PowerShell As An Adminisrator
 ```bash
-netsh advfirewall firewall add rule name="Nexus POS" dir=in action=allow protocol=tcp localport=4000
-```
+netsh advfi
+```rewall firewall add rule name="Nexus POS" dir=in action=allow protocol=tcp localport=4000
 
 ### Create The Admin Cashier
 ```bash
@@ -117,7 +117,7 @@ curl -X POST http://localhost:4000/api/manager/cashiers/register -H "Content-Typ
 Do this when the src/seed.js is listening on another port- Open a a new cmd
 
 ```bash
-pm2 start src/index.js --name nexus-server
+pm2 start src/index.js --name nexus-pos-server
 ```
 ```bash
 pm2 save
@@ -125,7 +125,7 @@ pm2 save
 
 when making changes on the database make sure you run
 ```bash
-pm2 restart nexus-server
+pm2 restart nexus-pos-server
 ```
 ### production code
 ```bash

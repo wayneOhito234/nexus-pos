@@ -87,3 +87,5 @@ export function mpesaCallbackAllowlist(req, res, next) {
   console.warn(`Rejected M-Pesa callback from ${ip}`);
   return res.status(403).json({ error: 'forbidden' });
 }
+
+export const tillIpGuard = ipAllowlist;
