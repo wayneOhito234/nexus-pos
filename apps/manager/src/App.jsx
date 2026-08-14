@@ -3,6 +3,9 @@ import { Sidebar } from './components/Sidebar.jsx';
 import { Login } from './components/Login.jsx';
 import { ProductsView } from './components/ProductsView.jsx';
 import { InventoryView } from './components/InventoryView.jsx';
+import { StaffView } from './components/StaffView.jsx';
+import { DrawerPinsView } from './components/DrawerPinsView.jsx';
+import { ReportsView } from './components/ReportsView.jsx';
 import { loadServerOrigin } from './api/client.js';
 
 export default function App() {
@@ -35,20 +38,12 @@ export default function App() {
       <main className="shell__main">
         {section === 'products' && <ProductsView onNotify={notify} />}
         {section === 'inventory' && <InventoryView staff={staff} onNotify={notify} />}
-        {section === 'staff' && <Placeholder title="Staff" />}
-        {section === 'reports' && <Placeholder title="Reports" />}
+        {section === 'staff' && <StaffView staff={staff} onNotify={notify} />}
+        {section === 'drawer' && <DrawerPinsView staff={staff} onNotify={notify} />}
+        {section === 'reports' && <ReportsView onNotify={notify} />}
       </main>
 
       {toast && <div className={`toast toast--${toast.kind}`}>{toast.message}</div>}
-    </div>
-  );
-}
-
-function Placeholder({ title }) {
-  return (
-    <div className="placeholder">
-      <h2>{title}</h2>
-      <p>Not built yet.</p>
     </div>
   );
 }

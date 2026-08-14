@@ -10,7 +10,7 @@ export const salesRouter = Router();
 // sell" actually true -- not a hidden button, but the server refusing the
 // request outright.
 salesRouter.post('/', tillIpGuard, async (req, res) => {
-  const { terminal_id, payment_method, mpesa_ref, items, amount_received } = req.body;
+  const { terminal_id, payment_method, mpesa_ref, items, amount_received, cashier_id } = req.body;
 
   if (!terminal_id || !payment_method || !Array.isArray(items) || items.length === 0) {
     return res.status(400).json({ error: 'terminal_id, payment_method and items are required' });
@@ -53,11 +53,24 @@ salesRouter.post('/', tillIpGuard, async (req, res) => {
       changeGiven = Number(amount_received) - total;
     }
 
+    // cashier_id is recorded on the sale itself rather than inferred later
+    // from overlapping shift windows, which guesses wrong whenever two
+    // cashiers share a till across a handover.
     const { rows: saleRows } = await client.query(
-      `INSERT INTO sales (terminal_id, total, payment_method, mpesa_ref, amount_received, change_given)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       RETURNING id, terminal_id, total, payment_method, mpesa_ref, amount_received, change_given, created_at`,
-      [terminal_id, total, payment_method, mpesa_ref || null, amount_received || null, changeGiven]
+      `INSERT INTO sales
+         (terminal_id, cashier_id, total, payment_method, mpesa_ref, amount_received, change_given)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING id, terminal_id, cashier_id, total, payment_method, mpesa_ref,
+                 amount_received, change_given, created_at`,
+      [
+        terminal_id,
+        cashier_id ?? null,
+        total,
+        payment_method,
+        mpesa_ref || null,
+        amount_received || null,
+        changeGiven,
+      ]
     );
     const sale = saleRows[0];
 
@@ -71,13 +84,14 @@ salesRouter.post('/', tillIpGuard, async (req, res) => {
         [item.qty, item.product_id]
       );
 
-      // A sale is a stock movement like any other. Without this row, the
-      // ledger would show receipts and adjustments but silently omit the
-      // largest source of stock leaving the shelf.
+      // A sale is a stock movement like any other. Without this row the
+      // ledger would record deliveries and adjustments but silently omit
+      // the largest source of stock leaving the shelf.
       await client.query(
-        `INSERT INTO stock_movements (product_id, movement_type, qty_change, location, reason, reference_id)
-         VALUES ($1, 'sale', $2, 'shelf', $3, $4)`,
-        [item.product_id, -item.qty, `Sale #${sale.id} on ${terminal_id}`, sale.id]
+        `INSERT INTO stock_movements
+           (product_id, movement_type, qty_change, location, reason, reference_id, staff_id)
+         VALUES ($1, 'sale', $2, 'shelf', $3, $4, $5)`,
+        [item.product_id, -item.qty, `Sale #${sale.id} on ${terminal_id}`, sale.id, cashier_id ?? null]
       );
     }
 

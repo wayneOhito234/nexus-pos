@@ -1,9 +1,10 @@
-import { Package, Boxes, Users, BarChart3, LogOut, ShieldCheck } from 'lucide-react';
+import { Package, Boxes, Users, BarChart3, KeyRound, LogOut, ShieldCheck } from 'lucide-react';
 
 const SECTIONS = [
   { id: 'products', label: 'Products', icon: Package },
   { id: 'inventory', label: 'Inventory', icon: Boxes },
   { id: 'staff', label: 'Staff', icon: Users },
+  { id: 'drawer', label: 'Drawer PINs', icon: KeyRound },
   { id: 'reports', label: 'Reports', icon: BarChart3 },
 ];
 

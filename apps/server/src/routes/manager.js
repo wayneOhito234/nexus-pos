@@ -286,35 +286,172 @@ managerRouter.get('/shifts/history', managerIpGuard, async (req, res) => {
 });
 
 // ============================================================
-// Sales and drawer
+// Sales history
 // ============================================================
 
-// GET /api/manager/sales/history
 managerRouter.get('/sales/history', managerIpGuard, async (req, res) => {
   const { rows } = await pool.query(`
-    SELECT id, terminal_id, payment_method, total, mpesa_ref, created_at
-    FROM sales
-    ORDER BY created_at DESC
+    SELECT s.id, s.terminal_id, s.payment_method, s.total, s.mpesa_ref, s.created_at,
+           c.name AS cashier_name
+    FROM sales s
+    LEFT JOIN cashiers c ON c.id = s.cashier_id
+    ORDER BY s.created_at DESC
     LIMIT 100
   `);
   res.json(rows);
 });
 
-// POST /api/manager/drawer/open
-// A drawer opening not tied to a sale. Tills only -- there is no cash
-// drawer on the manager machine.
-managerRouter.post('/drawer/open', tillIpGuard, async (req, res) => {
-  const { cashier_id, terminal_id, reason } = req.body;
-  if (!terminal_id || !reason) {
-    return res.status(400).json({ error: 'terminal_id and reason are required' });
+// ============================================================
+// Drawer PINs
+//
+// Set fresh each morning by the manager, one per till. A PIN is tied to a
+// date, so yesterday's stops working on its own rather than relying on
+// anyone remembering to clear it.
+// ============================================================
+
+// Failed attempts per till, held in memory. A 4-digit PIN is trivially
+// brute-forced without this -- rate limiting matters more here than the
+// hashing does, since 10,000 combinations fall in seconds otherwise.
+const pinAttempts = new Map();
+const MAX_ATTEMPTS = 5;
+const LOCKOUT_MS = 5 * 60 * 1000;
+
+function attemptState(terminalId) {
+  const now = Date.now();
+  const entry = pinAttempts.get(terminalId);
+  if (!entry) return { count: 0, lockedUntil: 0 };
+  if (entry.lockedUntil && entry.lockedUntil < now) {
+    pinAttempts.delete(terminalId);
+    return { count: 0, lockedUntil: 0 };
+  }
+  return entry;
+}
+
+// GET /api/manager/drawer/pins
+// Which tills have a PIN today. The PIN itself is never returned -- if the
+// manager forgets it, they set a new one.
+managerRouter.get('/drawer/pins', managerIpGuard, async (req, res) => {
+  const { rows } = await pool.query(`
+    SELECT d.terminal_id, d.created_at, c.name AS set_by_name
+    FROM drawer_pins d
+    LEFT JOIN cashiers c ON c.id = d.set_by
+    WHERE d.valid_for = CURRENT_DATE AND d.cleared_at IS NULL
+    ORDER BY d.terminal_id
+  `);
+  res.json(rows);
+});
+
+// POST /api/manager/drawer/pin
+// body: { terminal_id, pin, set_by }
+managerRouter.post('/drawer/pin', managerIpGuard, async (req, res) => {
+  const { terminal_id, pin, set_by } = req.body;
+
+  if (!terminal_id || !pin) {
+    return res.status(400).json({ error: 'terminal_id and pin are required' });
+  }
+  if (!/^\d{4,8}$/.test(String(pin))) {
+    return res.status(400).json({ error: 'The PIN must be 4 to 8 digits' });
+  }
+
+  const pinHash = await bcrypt.hash(String(pin), 10);
+
+  const { rows } = await pool.query(
+    `INSERT INTO drawer_pins (terminal_id, pin_hash, valid_for, set_by)
+     VALUES ($1, $2, CURRENT_DATE, $3)
+     ON CONFLICT (terminal_id, valid_for)
+     DO UPDATE SET pin_hash = EXCLUDED.pin_hash,
+                   set_by = EXCLUDED.set_by,
+                   created_at = now(),
+                   cleared_at = NULL
+     RETURNING terminal_id, created_at`,
+    [terminal_id, pinHash, set_by ?? null]
+  );
+
+  // Setting a new PIN clears any lockout, so a manager fixing a forgotten
+  // PIN doesn't leave the till still locked out.
+  pinAttempts.delete(terminal_id);
+
+  res.status(201).json(rows[0]);
+});
+
+// DELETE /api/manager/drawer/pin/:terminalId
+// Ends drawer access for that till until a new PIN is set.
+managerRouter.delete('/drawer/pin/:terminalId', managerIpGuard, async (req, res) => {
+  const { rows } = await pool.query(
+    `UPDATE drawer_pins SET cleared_at = now()
+     WHERE terminal_id = $1 AND valid_for = CURRENT_DATE AND cleared_at IS NULL
+     RETURNING terminal_id`,
+    [req.params.terminalId]
+  );
+
+  if (rows.length === 0) {
+    return res.status(404).json({ error: 'No active PIN for that till today' });
+  }
+
+  pinAttempts.delete(req.params.terminalId);
+  res.json({ cleared: rows[0].terminal_id });
+});
+
+// POST /api/manager/drawer/verify
+// body: { terminal_id, pin, cashier_id, reason }
+//
+// Verification and logging happen together on purpose. Separating them
+// would let a till log a drawer open without ever passing the check.
+managerRouter.post('/drawer/verify', tillIpGuard, async (req, res) => {
+  const { terminal_id, pin, cashier_id, reason } = req.body;
+
+  if (!terminal_id || !pin || !reason) {
+    return res.status(400).json({ error: 'terminal_id, pin and reason are required' });
+  }
+
+  const state = attemptState(terminal_id);
+  if (state.lockedUntil > Date.now()) {
+    const mins = Math.ceil((state.lockedUntil - Date.now()) / 60000);
+    return res.status(429).json({
+      error: `Too many wrong PINs. Try again in ${mins} minute${mins === 1 ? '' : 's'}, or ask the manager to set a new one.`,
+    });
   }
 
   const { rows } = await pool.query(
+    `SELECT pin_hash FROM drawer_pins
+     WHERE terminal_id = $1 AND valid_for = CURRENT_DATE AND cleared_at IS NULL`,
+    [terminal_id]
+  );
+
+  if (rows.length === 0) {
+    return res.status(403).json({
+      error: 'No drawer PIN has been set for this till today. Ask the manager.',
+    });
+  }
+
+  const valid = await bcrypt.compare(String(pin), rows[0].pin_hash);
+
+  if (!valid) {
+    const count = state.count + 1;
+    const locked = count >= MAX_ATTEMPTS;
+    pinAttempts.set(terminal_id, {
+      count,
+      lockedUntil: locked ? Date.now() + LOCKOUT_MS : 0,
+    });
+
+    console.warn(`Wrong drawer PIN on ${terminal_id} (${count}/${MAX_ATTEMPTS})`);
+
+    return res.status(401).json({
+      error: locked
+        ? 'Too many wrong PINs. The drawer is locked for 5 minutes.'
+        : `Wrong PIN. ${MAX_ATTEMPTS - count} attempt${MAX_ATTEMPTS - count === 1 ? '' : 's'} left.`,
+    });
+  }
+
+  pinAttempts.delete(terminal_id);
+
+  const { rows: event } = await pool.query(
     `INSERT INTO drawer_events (cashier_id, terminal_id, reason)
      VALUES ($1, $2, $3) RETURNING *`,
-    [cashier_id || null, terminal_id, reason]
+    [cashier_id ?? null, terminal_id, reason]
   );
-  res.status(201).json(rows[0]);
+
+  res.json({ ok: true, event: event[0] });
 });
 
 // GET /api/manager/drawer/history
@@ -495,8 +632,8 @@ managerRouter.patch('/products/:id/active', managerIpGuard, async (req, res) => 
 
 // PATCH /api/manager/products/:id
 // body: { stock_qty?, price?, reorder_level? }
-// Quick inline edits. Manager-only, since price and stock changes are
-// not a cashier's job.
+// Quick inline edits. Manager-only, since price and stock changes are not
+// a cashier's job.
 managerRouter.patch('/products/:id', managerIpGuard, async (req, res) => {
   const { id } = req.params;
   const { stock_qty, price, reorder_level } = req.body;

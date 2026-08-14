@@ -66,8 +66,16 @@ export const fetchMovements = (productId) =>
   get(`/api/inventory/movements${productId ? `?product_id=${productId}` : ''}`);
 export const fetchRoi = (days = 30) => get(`/api/inventory/roi?days=${days}`);
 
+// ---------- Drawer PINs ----------
+export const fetchDrawerPins = () => get('/api/manager/drawer/pins');
+export const setDrawerPin = (terminal_id, pin, set_by) =>
+  post('/api/manager/drawer/pin', { terminal_id, pin, set_by });
+export const clearDrawerPin = (terminalId) => del(`/api/manager/drawer/pin/${terminalId}`);
+
 // ---------- Reporting ----------
 export const fetchAnalyticsSummary = () => get('/api/analytics/summary');
+export const fetchBreakdown = (period = 'day') => get(`/api/analytics/breakdown?period=${period}`);
+export const fetchReceipt = (saleId) => get(`/api/analytics/receipt/${saleId}`);
 export const fetchSalesHistory = () => get('/api/manager/sales/history');
 export const fetchShiftHistory = () => get('/api/manager/shifts/history');
 export const fetchDrawerHistory = () => get('/api/manager/drawer/history');

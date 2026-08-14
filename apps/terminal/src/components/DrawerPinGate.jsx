@@ -1,18 +1,34 @@
 import { useState } from 'react';
+import { verifyDrawerPin } from '../api/managerClient.js';
+import { getTerminalId } from '../terminalId.js';
 
-const DRAWER_PIN = '5150';
-
-export function DrawerPinGate({ title = 'Open Drawer (No Sale)', onUnlock, onCancel }) {
+// The PIN is checked by the server, never here. A hardcoded value in the
+// frontend is readable by anyone who opens DevTools.
+export function DrawerPinGate({ title = 'Open Drawer (No Sale)', reason, cashierId, onUnlock, onCancel }) {
   const [pin, setPin] = useState('');
   const [error, setError] = useState('');
+  const [checking, setChecking] = useState(false);
 
-  function handleSubmit(e) {
+  async function handleSubmit(e) {
     e.preventDefault();
-    if (pin === DRAWER_PIN) {
+    if (!pin.trim()) return setError('Enter the PIN.');
+
+    setChecking(true);
+    setError('');
+
+    try {
+      await verifyDrawerPin({
+        terminal_id: getTerminalId(),
+        pin: pin.trim(),
+        cashier_id: cashierId,
+        reason,
+      });
       onUnlock();
-    } else {
-      setError('Incorrect drawer PIN');
+    } catch (err) {
+      setError(err.message);
       setPin('');
+    } finally {
+      setChecking(false);
     }
   }
 
@@ -26,12 +42,13 @@ export function DrawerPinGate({ title = 'Open Drawer (No Sale)', onUnlock, onCan
           autoFocus
           value={pin}
           onChange={(e) => setPin(e.target.value)}
-          placeholder="Enter drawer PIN"
+          placeholder="Today's drawer PIN"
+          disabled={checking}
         />
         {error && <p className="manager-pin-error">{error}</p>}
         <div className="manager-pin-actions">
-          <button type="button" onClick={onCancel}>Cancel</button>
-          <button type="submit">Unlock</button>
+          <button type="button" onClick={onCancel} disabled={checking}>Cancel</button>
+          <button type="submit" disabled={checking}>{checking ? 'Checking...' : 'Unlock'}</button>
         </div>
       </form>
     </div>

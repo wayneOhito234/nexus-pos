@@ -7,29 +7,25 @@ import { ProductGrid } from './components/ProductGrid.jsx';
 import { ProductGridSkeleton } from './components/ProductGridSkeleton.jsx';
 import { Cart } from './components/Cart.jsx';
 import { Receipt } from './components/Receipt.jsx';
-import { ManagerPinGate, ManagerPanel } from './components/ManagerPanel.jsx';
 import { DrawerPinGate } from './components/DrawerPinGate.jsx';
 import { ChangeConfirm } from './components/ChangeConfirm.jsx';
-import { AnalyticsPanel } from './components/AnalyticsPanel.jsx';
-import { AdminPanel } from './components/AdminPanel.jsx';
 import { Login } from './components/Login.jsx';
 import { TerminalSetup } from './components/TerminalSetup.jsx';
 import { ToastContainer } from './components/ToastContainer.jsx';
 import { useToasts } from './hooks/useToasts.js';
-import { fetchProducts, postSale, initiateStkPush, checkPaymentStatus, loadServerOrigin, SERVER_ORIGIN } from './api/client.js';
-import { clockOut, fetchAnalyticsSummary, openDrawer } from './api/managerClient.js';
+import {
+  fetchProducts,
+  postSale,
+  initiateStkPush,
+  checkPaymentStatus,
+  loadServerOrigin,
+  SERVER_ORIGIN,
+} from './api/client.js';
+import { clockOut } from './api/managerClient.js';
 import { connectSocket, getSocket } from './socket.js';
 import { loadTerminalId, getTerminalId } from './terminalId.js';
 
-const BRANCH_NAME = 'Exit Mart Supermarket';
-
-// ── VFD helper — silently no-ops if VFD is not connected ─────────────────────
-const vfd = {
-  itemAdded:    (name, price, total)          => window.nexusVfd?.itemAdded(name, price, total),
-  checkout:     (total, method)               => window.nexusVfd?.checkout(total, method),
-  saleComplete: (changeGiven, method)         => window.nexusVfd?.saleComplete(changeGiven, method),
-  welcome:      ()                            => window.nexusVfd?.welcome(),
-};
+const BRANCH_NAME = 'Zummart Supermarket';
 
 export default function App() {
   const [bootState, setBootState] = useState('checking'); // checking | needs-setup | ready
@@ -47,12 +43,6 @@ export default function App() {
   const [paymentStatus, setPaymentStatus] = useState(null);
   const [receipt, setReceipt] = useState(null);
 
-  const [managerMode, setManagerMode] = useState(false);
-  const [showPinGate, setShowPinGate] = useState(false);
-  const [showManagerPanel, setShowManagerPanel] = useState(false);
-  const [showAnalytics, setShowAnalytics] = useState(false);
-  const [showAdmin, setShowAdmin] = useState(false);
-  const [todayKpi, setTodayKpi] = useState(null);
   const [showDrawerPin, setShowDrawerPin] = useState(false);
   const [showChangeDrawerPin, setShowChangeDrawerPin] = useState(false);
   const [showChangeConfirm, setShowChangeConfirm] = useState(false);
@@ -60,7 +50,7 @@ export default function App() {
 
   const { toasts, addToast, removeToast } = useToasts();
 
-  // ---- Boot sequence: check config -> setup screen or continue ----
+  // ---- Boot: check config, then either show setup or start up ----
   useEffect(() => {
     async function boot() {
       const configured = await window.nexusConfig?.isConfigured();
@@ -141,27 +131,6 @@ export default function App() {
     };
   }, [socketReady]);
 
-  useEffect(() => {
-    if (bootState !== 'ready') return;
-    let cancelled = false;
-
-    async function loadKpi() {
-      try {
-        const summary = await fetchAnalyticsSummary();
-        if (!cancelled) setTodayKpi(summary);
-      } catch (err) {
-        // Silent -- KPI strip just stays hidden if this fails
-      }
-    }
-
-    loadKpi();
-    const interval = setInterval(loadKpi, 30000);
-    return () => {
-      cancelled = true;
-      clearInterval(interval);
-    };
-  }, [bootState]);
-
   const categories = useMemo(
     () => Array.from(new Set(products.map((p) => p.category))).sort(),
     [products]
@@ -185,30 +154,17 @@ export default function App() {
     [cart]
   );
 
-  // ── Cart functions ────────────────────────────────────────────────────────────
-
   function addToCart(product) {
     setCart((prev) => {
       const existing = prev.find((item) => item.product.id === product.id);
       const currentQty = existing?.qty || 0;
       if (currentQty >= product.stock_qty) return prev;
-
-      let newCart;
       if (existing) {
-        newCart = prev.map((item) =>
+        return prev.map((item) =>
           item.product.id === product.id ? { ...item, qty: item.qty + 1 } : item
         );
-      } else {
-        newCart = [...prev, { product, qty: 1 }];
       }
-
-      // ── VFD: show scanned item and running total ──
-      const { total: newTotal } = calcTotals(
-        newCart.map((item) => ({ price: Number(item.product.price), qty: item.qty }))
-      );
-      vfd.itemAdded(product.name, product.price, newTotal);
-
-      return newCart;
+      return [...prev, { product, qty: 1 }];
     });
   }
 
@@ -238,11 +194,12 @@ export default function App() {
     });
   }
 
-  // ── Checkout ──────────────────────────────────────────────────────────────────
-
   function buildReceipt(sale, paymentMethod, extra = {}) {
     return {
       saleId: sale.id,
+      localRef: sale.local_ref,
+      terminalId: getTerminalId(),
+      cashierName: cashier?.name,
       items: cart.map((item) => ({
         name: item.product.name,
         qty: item.qty,
@@ -261,32 +218,24 @@ export default function App() {
   async function handleCheckoutCash(amountReceived) {
     setCheckingOut(true);
     setPaymentStatus(null);
-
-    // ── VFD: show total and payment method while processing ──
-    vfd.checkout(total, 'cash');
-
     try {
       const payload = {
         terminal_id: getTerminalId(),
+        cashier_id: cashier.id,
         payment_method: PAYMENT_METHODS.CASH,
         amount_received: amountReceived,
         items: cart.map((item) => ({ product_id: item.product.id, qty: item.qty })),
       };
       const sale = await postSale(payload);
-
-      // ── VFD: show thank you + change ──
-      vfd.saleComplete(sale.change_given ?? 0, 'cash');
-
-      setReceipt(buildReceipt(sale, 'Cash', {
-        amountReceived: sale.amount_received,
-        changeGiven: sale.change_given,
-      }));
+      setReceipt(
+        buildReceipt(sale, 'Cash', {
+          amountReceived: sale.amount_received,
+          changeGiven: sale.change_given,
+        })
+      );
       setCart([]);
       addToast(`Sale #${sale.id} complete, KES ${Number(sale.total).toFixed(2)}`, 'success');
-      fetchAnalyticsSummary().then(setTodayKpi).catch(() => {});
     } catch (err) {
-      // ── VFD: return to welcome on failure ──
-      vfd.welcome();
       addToast(`Checkout failed: ${err.message}`, 'error');
     } finally {
       setCheckingOut(false);
@@ -296,10 +245,6 @@ export default function App() {
   async function handleCheckoutMpesa(phone) {
     setCheckingOut(true);
     setPaymentStatus('Sending payment request...');
-
-    // ── VFD: show total and M-Pesa prompt ──
-    vfd.checkout(total, 'mpesa');
-
     try {
       const { checkoutRequestId } = await initiateStkPush({
         phone,
@@ -307,40 +252,32 @@ export default function App() {
         terminal_id: getTerminalId(),
       });
 
-      setPaymentStatus(`Waiting for customer to approve on their phone... (ID: ${checkoutRequestId})`);
+      setPaymentStatus(`Waiting for the customer to approve on their phone... (ID: ${checkoutRequestId})`);
 
       const finalStatus = await pollPaymentStatus(checkoutRequestId);
 
       if (finalStatus.status !== 'confirmed') {
         setPaymentStatus(`Payment ${finalStatus.status}: ${finalStatus.resultDesc || 'not completed'}`);
         addToast(`Payment ${finalStatus.status}`, 'error');
-        // ── VFD: return to welcome if payment not confirmed ──
-        vfd.welcome();
         setCheckingOut(false);
         return;
       }
 
       const payload = {
         terminal_id: getTerminalId(),
+        cashier_id: cashier.id,
         payment_method: PAYMENT_METHODS.MPESA,
         mpesa_ref: finalStatus.mpesaRef,
         items: cart.map((item) => ({ product_id: item.product.id, qty: item.qty })),
       };
       const sale = await postSale(payload);
-
-      // ── VFD: show thank you for M-Pesa ──
-      vfd.saleComplete(0, 'mpesa');
-
       setReceipt(buildReceipt(sale, 'M-Pesa', { mpesaRef: finalStatus.mpesaRef }));
       setCart([]);
       setPaymentStatus(null);
       addToast(`Sale #${sale.id} complete, KES ${Number(sale.total).toFixed(2)}`, 'success');
-      fetchAnalyticsSummary().then(setTodayKpi).catch(() => {});
     } catch (err) {
       setPaymentStatus(`Payment failed: ${err.message}`);
       addToast(`Payment failed: ${err.message}`, 'error');
-      // ── VFD: return to welcome on error ──
-      vfd.welcome();
     } finally {
       setCheckingOut(false);
     }
@@ -355,38 +292,10 @@ export default function App() {
     return { status: 'pending' };
   }
 
-  // ── Manager / drawer ──────────────────────────────────────────────────────────
-
-  function handleManagerButtonClick() {
-    if (managerMode) {
-      setShowManagerPanel(true);
-    } else {
-      setShowPinGate(true);
-    }
-  }
-
-  function handlePinUnlock() {
-    setManagerMode(true);
-    setShowPinGate(false);
-    setShowManagerPanel(true);
-  }
-
-  function handleExitManagerMode() {
-    setManagerMode(false);
-    setShowManagerPanel(false);
-  }
-
-  async function handleDrawerOpened() {
-    try {
-      await openDrawer({
-        cashier_id: cashier.id,
-        terminal_id: getTerminalId(),
-        reason: 'No sale',
-      });
-      addToast('Drawer opened (No Sale) \u2014 logged.', 'info');
-    } catch (err) {
-      addToast(`Could not open drawer: ${err.message}`, 'error');
-    }
+  // The gate verifies the PIN and records the drawer event server-side, so
+  // by the time these run the opening is already logged.
+  function handleDrawerOpened() {
+    addToast('Drawer opened (No Sale) \u2014 logged.', 'info');
     setShowDrawerPin(false);
   }
 
@@ -395,17 +304,8 @@ export default function App() {
     setShowChangeDrawerPin(true);
   }
 
-  async function handleChangeDrawerUnlocked() {
+  function handleChangeDrawerUnlocked() {
     setShowChangeDrawerPin(false);
-    try {
-      await openDrawer({
-        cashier_id: cashier.id,
-        terminal_id: getTerminalId(),
-        reason: 'Change given',
-      });
-    } catch (err) {
-      console.warn('drawer log failed:', err.message);
-    }
     setShowChangeConfirm(true);
   }
 
@@ -422,13 +322,9 @@ export default function App() {
     await handleCheckoutCash(amount);
   }
 
-  // ── Session ───────────────────────────────────────────────────────────────────
-
   function handleLoggedIn(newCashier) {
     setCashier(newCashier);
     window.nexusSession?.setCashierId(newCashier.id);
-    // ── VFD: show welcome when cashier logs in ──
-    vfd.welcome();
   }
 
   async function handleLogout() {
@@ -440,12 +336,7 @@ export default function App() {
     }
     window.nexusSession?.clearCashierId();
     setCashier(null);
-    setManagerMode(false);
-    // ── VFD: show welcome when cashier logs out ──
-    vfd.welcome();
   }
-
-  // ── Render ────────────────────────────────────────────────────────────────────
 
   if (bootState === 'checking') {
     return <div className="app" style={{ alignItems: 'center', justifyContent: 'center', display: 'flex' }} />;
@@ -465,20 +356,15 @@ export default function App() {
         branchName={BRANCH_NAME}
         cashierName={cashier.name}
         online={online}
-        managerMode={managerMode}
-        onManagerClick={handleManagerButtonClick}
         onLogout={handleLogout}
-        canAccessManager={cashier.role === 'manager' || cashier.role === 'admin'}
-        onAnalyticsClick={() => setShowAnalytics(true)}
-        todayKpi={todayKpi}
-        canAccessAdmin={cashier.role === 'admin'}
-        onAdminClick={() => setShowAdmin(true)}
         onNoSaleClick={() => setShowDrawerPin(true)}
       />
+
       <div className="app__toolbar">
         <SearchBar value={search} onChange={setSearch} />
         <CategoryTabs categories={categories} selected={category} onSelect={setCategory} />
       </div>
+
       <div className="app__body">
         {productsLoading ? (
           <ProductGridSkeleton />
@@ -495,38 +381,35 @@ export default function App() {
           onRequestChangeFlow={handleRequestChangeFlow}
           checkingOut={checkingOut}
           paymentStatus={paymentStatus}
-          managerMode={managerMode}
           onRemoveItem={removeCartItem}
           onIncrement={incrementCartItem}
           onDecrement={decrementCartItem}
         />
       </div>
+
       <ToastContainer toasts={toasts} onDismiss={removeToast} />
+
       {receipt && <Receipt receipt={receipt} onClose={() => setReceipt(null)} />}
-      {showPinGate && (
-        <ManagerPinGate onUnlock={handlePinUnlock} onCancel={() => setShowPinGate(false)} />
-      )}
-      {showManagerPanel && (
-        <ManagerPanel
-          products={products}
-          onClose={() => setShowManagerPanel(false)}
-          onExitManagerMode={handleExitManagerMode}
+
+      {showDrawerPin && (
+        <DrawerPinGate
+          reason="No sale"
+          cashierId={cashier.id}
+          onUnlock={handleDrawerOpened}
+          onCancel={() => setShowDrawerPin(false)}
         />
       )}
-      {showAnalytics && <AnalyticsPanel onClose={() => setShowAnalytics(false)} />}
-      {showAdmin && (
-        <AdminPanel onClose={() => setShowAdmin(false)} currentCashierId={cashier.id} />
-      )}
-      {showDrawerPin && (
-        <DrawerPinGate onUnlock={handleDrawerOpened} onCancel={() => setShowDrawerPin(false)} />
-      )}
+
       {showChangeDrawerPin && (
         <DrawerPinGate
           title="Enter PIN to open drawer"
+          reason="Change given"
+          cashierId={cashier.id}
           onUnlock={handleChangeDrawerUnlocked}
           onCancel={handleChangeCancelled}
         />
       )}
+
       {showChangeConfirm && (
         <ChangeConfirm
           amountReceived={pendingCashAmount}

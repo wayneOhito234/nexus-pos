@@ -108,14 +108,14 @@ export async function clockOutAll() {
   return body;
 }
 
-export async function openDrawer({ cashier_id, terminal_id, reason }) {
-  const res = await fetchWithTimeout(`${SERVER_ORIGIN}/api/manager/drawer/open`, {
+export async function verifyDrawerPin({ terminal_id, pin, cashier_id, reason }) {
+  const res = await fetchWithTimeout(`${SERVER_ORIGIN}/api/manager/drawer/verify`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ cashier_id, terminal_id, reason }),
+    body: JSON.stringify({ terminal_id, pin, cashier_id, reason }),
   });
   const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(body.error || 'failed to log drawer open');
+  if (!res.ok) throw new Error(body.error || 'Could not verify the PIN');
   return body;
 }
 

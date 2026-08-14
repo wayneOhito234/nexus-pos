@@ -1,3 +1,15 @@
+psql -U postgres -d nexus_pos -c "ALTER TABLE sales ADD COLUMN IF NOT EXISTS cashier_id INTEGER REFERENCES cashiers(id);"
+psql -U postgres -d nexus_pos -c "CREATE INDEX IF NOT EXISTS idx_sales_cashier ON sales(cashier_id);"
+psql -U postgres -d nexus_pos -c "CREATE TABLE IF NOT EXISTS drawer_pins (id SERIAL PRIMARY KEY, terminal_id TEXT NOT NULL, pin_hash TEXT NOT NULL, valid_for DATE NOT NULL, set_by INTEGER REFERENCES cashiers(id), created_at TIMESTAMPTZ NOT NULL DEFAULT now(), cleared_at TIMESTAMPTZ, UNIQUE (terminal_id, valid_for));"
+psql -U postgres -d nexus_pos -c "CREATE TABLE IF NOT EXISTS drawer_pins (id SERIAL PRIMARY KEY, terminal_id TEXT NOT NULL, pin_hash TEXT NOT NULL, valid_for DATE NOT NULL, set_by INTEGER REFERENCES cashiers(id), created_at TIMESTAMPTZ NOT NULL DEFAULT now(), cleared_at TIMESTAMPTZ, UNIQUE (terminal_id, valid_for));"
+
+
+curl.exe http://localhost:4000/api/analytics/breakdown?period=day
+2
+cd C:\nexus-pos\apps\terminal\src\components
+Remove-Item ManagerPanel.jsx, AdminPanel.jsx, AnalyticsPanel.jsx
+
+
 Run this commands 
 curl.exe -X POST http://192.168.100.11:4000/api/inventory/suppliers -H "Content-Type: application/json" -d "{\"name\":\"Brookside Dairy\",\"phone\":\"0722000000\"}"
 
