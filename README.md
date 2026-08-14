@@ -78,8 +78,6 @@ $fixed + "export const tillIpGuard = ipAllowlist;" | Set-Content $file
 Set-Content "C:\nexus-pos\apps\server\site.config.js" $config
 ```
 
-
-
 ## Server Side Dependencies And Configuration  cd nexus-pos/apps/server
 ### Adding the Firewall Port
 
