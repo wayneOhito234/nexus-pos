@@ -10,7 +10,7 @@ export const siteConfig = {
   ],
   managerIps: [
    
-    '192.168.100.5',
+    '192.168.100.16',
   ],
   allowSubnet: '192.168.100.0/24',
 };
