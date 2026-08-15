@@ -195,6 +195,14 @@ managerRouter.post('/cashiers/register', ...managerOnly, async (req, res) => {
 });
 
 // DELETE /api/manager/cashiers/:id
+//
+// A real, permanent delete. Sessions and shifts are cleared explicitly
+// first since those rows shouldn't outlive the account at all. Everything
+// else that references this cashier (drawer_events, sales, stock_movements,
+// goods_received.received_by) is set up with ON DELETE SET NULL at the
+// database level, so old records keep existing for reporting but just lose
+// the name -- the same fallback the UI already shows for those. The
+// try/catch below is a safety net in case some other reference was missed.
 managerRouter.delete('/cashiers/:id', ...managerOnly, async (req, res) => {
   const { id } = req.params;
 
@@ -210,12 +218,20 @@ managerRouter.delete('/cashiers/:id', ...managerOnly, async (req, res) => {
   await pool.query('DELETE FROM sessions WHERE cashier_id = $1', [id]);
   await pool.query('DELETE FROM shifts WHERE cashier_id = $1', [id]);
 
-  const { rows } = await pool.query('DELETE FROM cashiers WHERE id = $1 RETURNING id, name', [id]);
-  if (rows.length === 0) {
-    return res.status(404).json({ error: 'Account not found' });
+  try {
+    const { rows } = await pool.query('DELETE FROM cashiers WHERE id = $1 RETURNING id, name', [id]);
+    if (rows.length === 0) {
+      return res.status(404).json({ error: 'Account not found' });
+    }
+    res.json({ deleted: rows[0] });
+  } catch (err) {
+    if (err.code === '23503') {
+      return res.status(409).json({
+        error: `This account still has related records blocking deletion (${err.constraint || 'unknown constraint'}). Run the cashier foreign-key migration, or clear that history first.`,
+      });
+    }
+    throw err;
   }
-
-  res.json({ deleted: rows[0] });
 });
 
 // PATCH /api/manager/cashiers/:id/role
