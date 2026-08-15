@@ -19,6 +19,8 @@ import {
   initiateStkPush,
   checkPaymentStatus,
   loadServerOrigin,
+  setAuthToken,
+  clearAuthToken,
   SERVER_ORIGIN,
 } from './api/client.js';
 import { clockOut } from './api/managerClient.js';
@@ -322,7 +324,13 @@ export default function App() {
     await handleCheckoutCash(amount);
   }
 
+  // The token comes back from login alongside the cashier's identity, but it
+  // only does anything once it's handed to client.js -- that's the module
+  // that actually attaches it to outgoing requests. Store it in state
+  // without doing this and every authenticated call (drawer verify,
+  // clock-out, etc.) silently goes out with no Authorization header at all.
   function handleLoggedIn(newCashier) {
+    setAuthToken(newCashier.token);
     setCashier(newCashier);
     window.nexusSession?.setCashierId(newCashier.id);
   }
@@ -334,6 +342,7 @@ export default function App() {
     } catch (err) {
       console.warn('clock-out failed:', err.message);
     }
+    clearAuthToken();
     window.nexusSession?.clearCashierId();
     setCashier(null);
   }

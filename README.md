@@ -1,4 +1,30 @@
+psql -U postgres -d nexus_pos
 
+```bash
+DO $$
+DECLARE
+  r RECORD;
+BEGIN
+  FOR r IN
+    SELECT tc.table_name, tc.constraint_name, kcu.column_name
+    FROM information_schema.table_constraints tc
+    JOIN information_schema.key_column_usage kcu
+      ON tc.constraint_name = kcu.constraint_name
+    JOIN information_schema.constraint_column_usage ccu
+      ON tc.constraint_name = ccu.constraint_name
+    WHERE tc.constraint_type = 'FOREIGN KEY'
+      AND ccu.table_name = 'cashiers'
+      AND ccu.column_name = 'id'
+      AND tc.table_name NOT IN ('sessions', 'shifts')
+  LOOP
+    EXECUTE format('ALTER TABLE %I DROP CONSTRAINT %I', r.table_name, r.constraint_name);
+    EXECUTE format(
+      'ALTER TABLE %I ADD CONSTRAINT %I FOREIGN KEY (%I) REFERENCES cashiers(id) ON DELETE SET NULL',
+      r.table_name, r.constraint_name, r.column_name
+    );
+  END LOOP;
+END $$;
+```
 ### Latest Changes
 ```bash
 psql -U postgres -d nexus_pos -c "ALTER TABLE products ADD COLUMN IF NOT EXISTS reorder_level INTEGER NOT NULL DEFAULT 10, ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT true, ADD COLUMN IF NOT EXISTS cost_price NUMERIC(10,2), ADD COLUMN IF NOT EXISTS store_qty INTEGER NOT NULL DEFAULT 0, ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now();"
