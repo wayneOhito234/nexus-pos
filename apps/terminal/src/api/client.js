@@ -1,5 +1,17 @@
 export let SERVER_ORIGIN = 'http://localhost:4000'; // overwritten once config loads
 
+// Held in memory only, never written to disk. Closing the window ends the
+// session, which is exactly the behaviour a shared till should have.
+let authToken = null;
+
+export function setAuthToken(token) {
+  authToken = token;
+}
+
+export function clearAuthToken() {
+  authToken = null;
+}
+
 export async function loadServerOrigin() {
   const config = await window.nexusConfig?.read();
   if (config?.serverOrigin) {
@@ -9,12 +21,19 @@ export async function loadServerOrigin() {
 }
 
 // Wraps fetch with a timeout so a wrong or unreachable server address fails
-// with a clear message instead of hanging the UI indefinitely.
+// with a clear message instead of hanging the UI indefinitely. Also attaches
+// the session token, so individual calls don't each have to remember to.
 export async function fetchWithTimeout(url, options = {}, timeoutMs = 6000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  const headers = {
+    ...(options.headers || {}),
+    ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+  };
+
   try {
-    return await fetch(url, { ...options, signal: controller.signal });
+    return await fetch(url, { ...options, headers, signal: controller.signal });
   } catch (err) {
     if (err.name === 'AbortError') {
       throw new Error(`No response from ${SERVER_ORIGIN} after ${timeoutMs / 1000}s`);
@@ -56,7 +75,7 @@ export async function postSale(payload) {
     body: JSON.stringify(payload),
   });
   const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(body.error || 'failed to post sale');
+  if (!res.ok) throw new Error(body.error || 'Could not complete the sale');
   return body;
 }
 
@@ -74,6 +93,6 @@ export async function initiateStkPush({ phone, amount, terminal_id }) {
 export async function checkPaymentStatus(checkoutRequestId) {
   const res = await fetchWithTimeout(`${SERVER_ORIGIN}/api/mpesa/status/${checkoutRequestId}`);
   const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(body.error || 'status check failed');
+  if (!res.ok) throw new Error(body.error || 'Status check failed');
   return body;
 }

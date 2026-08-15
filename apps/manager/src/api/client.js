@@ -1,5 +1,17 @@
 export let SERVER_ORIGIN = 'http://localhost:4000';
 
+// Held in memory only, never written to disk. Closing the window ends the
+// session, which is the behaviour a manager terminal should have.
+let authToken = null;
+
+export function setAuthToken(token) {
+  authToken = token;
+}
+
+export function clearAuthToken() {
+  authToken = null;
+}
+
 export async function loadServerOrigin() {
   const config = await window.nexusConfig?.read();
   if (config?.serverOrigin) SERVER_ORIGIN = config.serverOrigin;
@@ -12,13 +24,26 @@ async function request(path, options = {}, timeoutMs = 8000) {
 
   try {
     const res = await fetch(`${SERVER_ORIGIN}${path}`, {
-      headers: { 'Content-Type': 'application/json' },
       ...options,
+      headers: {
+        'Content-Type': 'application/json',
+        ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+        ...(options.headers || {}),
+      },
       signal: controller.signal,
     });
 
     const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(body.error || `Server responded ${res.status}`);
+
+    if (!res.ok) {
+      // A 401 means the session died -- expired, revoked, or the server
+      // restarted. Say so plainly rather than passing on a generic error.
+      if (res.status === 401) {
+        throw new Error(body.error || 'Your session ended. Sign in again.');
+      }
+      throw new Error(body.error || `Server responded ${res.status}`);
+    }
+
     return body;
   } catch (err) {
     if (err.name === 'AbortError') throw new Error(`No response from ${SERVER_ORIGIN}`);
@@ -36,6 +61,7 @@ const del = (path) => request(path, { method: 'DELETE' });
 
 // ---------- Auth and staff ----------
 export const staffLogin = (creds) => post('/api/manager/staff/login', creds);
+export const signOut = () => post('/api/manager/signout', {});
 export const fetchStaff = () => get('/api/manager/staff');
 export const registerStaff = (data) => post('/api/manager/cashiers/register', data);
 export const updateStaffRole = (id, role) => patch(`/api/manager/cashiers/${id}/role`, { role });
@@ -59,7 +85,8 @@ export const updateSupplier = (id, s) => patch(`/api/inventory/suppliers/${id}`,
 export const fetchDeliveries = () => get('/api/inventory/goods-received');
 export const fetchDelivery = (id) => get(`/api/inventory/goods-received/${id}`);
 export const createDelivery = (d) => post('/api/inventory/goods-received', d);
-export const recordPayment = (id, amount_paid) => patch(`/api/inventory/goods-received/${id}/payment`, { amount_paid });
+export const recordPayment = (id, amount_paid) =>
+  patch(`/api/inventory/goods-received/${id}/payment`, { amount_paid });
 export const transferToShelf = (t) => post('/api/inventory/transfer', t);
 export const adjustStock = (a) => post('/api/inventory/adjust', a);
 export const fetchMovements = (productId) =>
@@ -68,8 +95,8 @@ export const fetchRoi = (days = 30) => get(`/api/inventory/roi?days=${days}`);
 
 // ---------- Drawer PINs ----------
 export const fetchDrawerPins = () => get('/api/manager/drawer/pins');
-export const setDrawerPin = (terminal_id, pin, set_by) =>
-  post('/api/manager/drawer/pin', { terminal_id, pin, set_by });
+export const setDrawerPin = (terminal_id, pin) =>
+  post('/api/manager/drawer/pin', { terminal_id, pin });
 export const clearDrawerPin = (terminalId) => del(`/api/manager/drawer/pin/${terminalId}`);
 
 // ---------- Reporting ----------
@@ -79,3 +106,8 @@ export const fetchReceipt = (saleId) => get(`/api/analytics/receipt/${saleId}`);
 export const fetchSalesHistory = () => get('/api/manager/sales/history');
 export const fetchShiftHistory = () => get('/api/manager/shifts/history');
 export const fetchDrawerHistory = () => get('/api/manager/drawer/history');
+
+// ---------- Site info ----------
+// Reads the deployment's own configuration, so the manager app can show
+// which tills exist rather than having them hardcoded in a component.
+export const fetchSiteInfo = () => get('/api/site');

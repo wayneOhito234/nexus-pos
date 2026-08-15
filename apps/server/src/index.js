@@ -4,7 +4,8 @@ import cors from 'cors';
 import { createServer } from 'node:http';
 import { Server } from 'socket.io';
 import { pool } from './db.js';
-import { ipAllowlist, mpesaCallbackAllowlist } from './ipAllowlist.js';
+import { siteConfig } from './site.config.js';
+import { ipAllowlist, managerIpGuard, mpesaCallbackAllowlist } from './ipAllowlist.js';
 import { productsRouter } from './routes/products.js';
 import { salesRouter } from './routes/sales.js';
 import { mpesaRouter } from './routes/mpesa.js';
@@ -39,6 +40,18 @@ app.use((req, res, next) => {
   return ipAllowlist(req, res, next);
 });
 
+// GET /api/site
+// Lets the manager app read this deployment's own shape rather than having
+// till names hardcoded in a component, which breaks at any site that isn't
+// running exactly two tills.
+app.get('/api/site', managerIpGuard, (req, res) => {
+  res.json({
+    siteName: siteConfig.siteName,
+    tills: siteConfig.tillIps.map((_, i) => `till-${i + 1}`),
+    tillCount: siteConfig.tillIps.length,
+  });
+});
+
 app.use('/api/products', productsRouter);
 app.use('/api/sales', salesRouter);
 app.use('/api/mpesa', mpesaRouter);
@@ -57,6 +70,9 @@ const PORT = process.env.PORT || 4000;
 
 httpServer.listen(PORT, () => {
   console.log(`Nexus POS server listening on port ${PORT}`);
+  console.log(`Site: ${siteConfig.siteName}`);
+  console.log(`Tills: ${siteConfig.tillIps.join(', ') || 'none configured'}`);
+  console.log(`Manager: ${siteConfig.managerIps.join(', ') || 'unrestricted'}`);
 });
 
 process.on('SIGTERM', () => pool.end());

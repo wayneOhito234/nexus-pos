@@ -7,7 +7,6 @@ import {
   createDelivery,
   recordPayment,
   transferToShelf,
-  adjustStock,
   fetchMovements,
   fetchAllProducts,
 } from '../api/client.js';
@@ -22,7 +21,7 @@ const TABS = [
   { id: 'movements', label: 'Movements', icon: History },
 ];
 
-export function InventoryView({ staff, onNotify }) {
+export function InventoryView({ onNotify }) {
   const [tab, setTab] = useState('receive');
   const [products, setProducts] = useState([]);
   const [suppliers, setSuppliers] = useState([]);
@@ -58,13 +57,12 @@ export function InventoryView({ staff, onNotify }) {
         <ReceiveGoods
           products={products}
           suppliers={suppliers}
-          staff={staff}
           onNotify={onNotify}
           onDone={refreshProducts}
         />
       )}
       {tab === 'transfer' && (
-        <TransferStock products={products} staff={staff} onNotify={onNotify} onDone={refreshProducts} />
+        <TransferStock products={products} onNotify={onNotify} onDone={refreshProducts} />
       )}
       {tab === 'suppliers' && (
         <Suppliers suppliers={suppliers} setSuppliers={setSuppliers} onNotify={onNotify} />
@@ -76,7 +74,7 @@ export function InventoryView({ staff, onNotify }) {
 
 // ---------- Receive goods ----------
 
-function ReceiveGoods({ products, suppliers, staff, onNotify, onDone }) {
+function ReceiveGoods({ products, suppliers, onNotify, onDone }) {
   const [supplierId, setSupplierId] = useState('');
   const [reference, setReference] = useState('');
   const [amountPaid, setAmountPaid] = useState('');
@@ -110,7 +108,6 @@ function ReceiveGoods({ products, suppliers, staff, onNotify, onDone }) {
         supplier_id: Number(supplierId),
         reference: reference.trim() || null,
         amount_paid: amountPaid === '' ? 0 : Number(amountPaid),
-        received_by: staff.id,
         items: valid.map((l) => ({
           product_id: Number(l.product_id),
           qty: Number(l.qty),
@@ -154,7 +151,11 @@ function ReceiveGoods({ products, suppliers, staff, onNotify, onDone }) {
 
           <label className="field">
             <span>Invoice or delivery note</span>
-            <input value={reference} onChange={(e) => setReference(e.target.value)} placeholder="INV-2841" />
+            <input
+              value={reference}
+              onChange={(e) => setReference(e.target.value)}
+              placeholder="INV-2841"
+            />
           </label>
         </div>
 
@@ -236,14 +237,19 @@ function ReceiveGoods({ products, suppliers, staff, onNotify, onDone }) {
           <div className="record" key={d.id}>
             <div className="record__main">
               <strong>{d.supplier_name}</strong>
-              <span>{d.reference || 'No reference'} &middot; {when(d.received_at)}</span>
+              <span>
+                {d.reference || 'No reference'} &middot; {when(d.received_at)}
+                {d.received_by_name && <> &middot; {d.received_by_name}</>}
+              </span>
             </div>
             <div className="record__figures">
               <span>{kes(d.total_cost)}</span>
               {Number(d.balance_owed) > 0 && (
-                <PaymentButton delivery={d} onNotify={onNotify} onPaid={() =>
-                  fetchDeliveries().then(setDeliveries).catch(() => {})
-                } />
+                <PaymentButton
+                  delivery={d}
+                  onNotify={onNotify}
+                  onPaid={() => fetchDeliveries().then(setDeliveries).catch(() => {})}
+                />
               )}
             </div>
           </div>
@@ -260,6 +266,7 @@ function PaymentButton({ delivery, onNotify, onPaid }) {
       String(delivery.total_cost)
     );
     if (input === null) return;
+
     try {
       await recordPayment(delivery.id, Number(input));
       onNotify('Payment recorded', 'success');
@@ -278,7 +285,7 @@ function PaymentButton({ delivery, onNotify, onPaid }) {
 
 // ---------- Transfer ----------
 
-function TransferStock({ products, staff, onNotify, onDone }) {
+function TransferStock({ products, onNotify, onDone }) {
   const [productId, setProductId] = useState('');
   const [qty, setQty] = useState('');
   const [busy, setBusy] = useState(false);
@@ -295,7 +302,6 @@ function TransferStock({ products, staff, onNotify, onDone }) {
       const updated = await transferToShelf({
         product_id: Number(productId),
         qty: Number(qty),
-        staff_id: staff.id,
       });
       onNotify(`${qty} x ${updated.name} moved to the shelf`, 'success');
       setQty('');
@@ -387,7 +393,10 @@ function Suppliers({ suppliers, setSuppliers, onNotify }) {
         contact_person: contact.trim() || null,
         phone: phone.trim() || null,
       });
-      setSuppliers((prev) => [...prev, { ...created, total_ordered: 0, total_paid: 0, delivery_count: 0 }]);
+      setSuppliers((prev) => [
+        ...prev,
+        { ...created, total_ordered: 0, total_paid: 0, delivery_count: 0 },
+      ]);
       setName(''); setContact(''); setPhone('');
       onNotify(`${created.name} added`, 'success');
     } catch (err) {
@@ -423,9 +432,7 @@ function Suppliers({ suppliers, setSuppliers, onNotify }) {
             <div className="record" key={s.id}>
               <div className="record__main">
                 <strong>{s.name}</strong>
-                <span>
-                  {s.phone || 'No phone'} &middot; {s.delivery_count} deliveries
-                </span>
+                <span>{s.phone || 'No phone'} &middot; {s.delivery_count} deliveries</span>
               </div>
               <div className="record__figures">
                 <span>{kes(s.total_ordered)}</span>

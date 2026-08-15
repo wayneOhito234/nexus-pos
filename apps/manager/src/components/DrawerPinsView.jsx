@@ -1,25 +1,42 @@
 import { useEffect, useState } from 'react';
 import { KeyRound, ShieldOff, RefreshCw } from 'lucide-react';
-import { fetchDrawerPins, setDrawerPin, clearDrawerPin, fetchDrawerHistory } from '../api/client.js';
+import {
+  fetchDrawerPins,
+  setDrawerPin,
+  clearDrawerPin,
+  fetchDrawerHistory,
+  fetchSiteInfo,
+} from '../api/client.js';
 
-const TILLS = ['till-1', 'till-2'];
 const when = (iso) => new Date(iso).toLocaleString('en-KE', { dateStyle: 'medium', timeStyle: 'short' });
 
-export function DrawerPinsView({ staff, onNotify }) {
+export function DrawerPinsView({ onNotify }) {
+  const [tills, setTills] = useState([]);
   const [active, setActive] = useState([]);
   const [history, setHistory] = useState([]);
   const [drafts, setDrafts] = useState({});
   const [busy, setBusy] = useState('');
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => { load(); }, []);
 
   async function load() {
+    setLoading(true);
     try {
-      const [pins, log] = await Promise.all([fetchDrawerPins(), fetchDrawerHistory()]);
+      // The till list comes from the deployment's own config, so a site
+      // running three tills doesn't need a code change.
+      const [site, pins, log] = await Promise.all([
+        fetchSiteInfo(),
+        fetchDrawerPins(),
+        fetchDrawerHistory(),
+      ]);
+      setTills(site.tills || []);
       setActive(pins);
       setHistory(log);
     } catch (err) {
       onNotify(err.message, 'error');
+    } finally {
+      setLoading(false);
     }
   }
 
@@ -28,12 +45,14 @@ export function DrawerPinsView({ staff, onNotify }) {
 
   async function save(till) {
     const pin = (drafts[till] || '').trim();
-    if (!/^\d{4,8}$/.test(pin)) return onNotify('Use 4 to 8 digits.', 'error');
+    if (!/^\d{4,8}$/.test(pin)) {
+      return onNotify('Use 4 to 8 digits.', 'error');
+    }
 
     setBusy(till);
     try {
-      await setDrawerPin(till, pin, staff.id);
-      onNotify(`Drawer PIN set for ${till}. Tell the cashier on that till.`, 'success');
+      await setDrawerPin(till, pin);
+      onNotify(`PIN set for ${till}. Tell the cashier on that till.`, 'success');
       setDrafts((d) => ({ ...d, [till]: '' }));
       load();
     } catch (err) {
@@ -44,7 +63,10 @@ export function DrawerPinsView({ staff, onNotify }) {
   }
 
   async function clear(till) {
-    if (!window.confirm(`Clear the PIN for ${till}? The drawer stays shut until a new one is set.`)) return;
+    const confirmed = window.confirm(
+      `Clear the PIN for ${till}?\n\nThe drawer stays shut until a new one is set, which means that till cannot give change on a cash sale.`
+    );
+    if (!confirmed) return;
 
     setBusy(till);
     try {
@@ -58,6 +80,8 @@ export function DrawerPinsView({ staff, onNotify }) {
     }
   }
 
+  const unset = tills.filter((t) => !isSet(t));
+
   return (
     <div className="view">
       <header className="view__head">
@@ -66,14 +90,34 @@ export function DrawerPinsView({ staff, onNotify }) {
 
       <div className="split">
         <div className="panel">
-          <h3><KeyRound size={16} style={{ verticalAlign: '-3px', marginRight: 6 }} /> Today's PINs</h3>
+          <h3>
+            <KeyRound size={16} style={{ verticalAlign: '-3px', marginRight: 6 }} />
+            Today's PINs
+          </h3>
+
           <p className="panel__note">
             Set a fresh PIN for each till at the start of the day and tell that till's cashier.
             PINs expire overnight on their own, so yesterday's stops working without you doing
-            anything. The PIN is never shown again after you set it.
+            anything. The PIN is never shown again once set.
           </p>
 
-          {TILLS.map((till) => {
+          {unset.length > 0 && !loading && (
+            <p className="pin-warning">
+              {unset.length === tills.length
+                ? 'No PINs set today. Cash sales needing change will be blocked on every till.'
+                : `${unset.join(', ')} has no PIN yet and cannot give change.`}
+            </p>
+          )}
+
+          {loading && <p className="panel__note">Loading...</p>}
+
+          {!loading && tills.length === 0 && (
+            <p className="panel__note">
+              No tills are configured for this site. Check <code>site.config.js</code> on the server.
+            </p>
+          )}
+
+          {tills.map((till) => {
             const set = isSet(till);
             const info = detail(till);
 
@@ -100,11 +144,15 @@ export function DrawerPinsView({ staff, onNotify }) {
                     placeholder={set ? 'Replace with a new PIN' : 'New PIN'}
                     value={drafts[till] || ''}
                     onChange={(e) => setDrafts((d) => ({ ...d, [till]: e.target.value }))}
+                    onKeyDown={(e) => { if (e.key === 'Enter') save(till); }}
+                    disabled={busy === till}
                   />
+
                   <button className="primary" onClick={() => save(till)} disabled={busy === till}>
                     {set ? <RefreshCw size={14} /> : <KeyRound size={14} />}
                     {set ? 'Replace' : 'Set'}
                   </button>
+
                   {set && (
                     <button className="ghost-danger" onClick={() => clear(till)} disabled={busy === till}>
                       <ShieldOff size={14} />
@@ -119,8 +167,12 @@ export function DrawerPinsView({ staff, onNotify }) {
 
         <div className="panel">
           <h3>Drawer openings</h3>
-          <p className="panel__note">Every time a drawer opened outside a completed sale.</p>
+          <p className="panel__note">
+            Every time a drawer opened outside a completed sale, and who opened it.
+          </p>
+
           {history.length === 0 && <p className="panel__note">Nothing logged yet.</p>}
+
           {history.map((d) => (
             <div className="record" key={d.id}>
               <div className="record__main">

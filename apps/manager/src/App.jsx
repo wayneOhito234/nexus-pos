@@ -6,7 +6,7 @@ import { InventoryView } from './components/InventoryView.jsx';
 import { StaffView } from './components/StaffView.jsx';
 import { DrawerPinsView } from './components/DrawerPinsView.jsx';
 import { ReportsView } from './components/ReportsView.jsx';
-import { loadServerOrigin } from './api/client.js';
+import { loadServerOrigin, setAuthToken, clearAuthToken, signOut } from './api/client.js';
 
 export default function App() {
   const [ready, setReady] = useState(false);
@@ -23,8 +23,26 @@ export default function App() {
     setTimeout(() => setToast(null), 4000);
   }
 
+  function handleSignedIn(staffMember) {
+    setAuthToken(staffMember.token);
+    setStaff(staffMember);
+  }
+
+  async function handleSignOut() {
+    // Tell the server to revoke the session, but don't let a failure there
+    // trap someone inside the app -- clearing locally is what matters most.
+    try {
+      await signOut();
+    } catch {
+      // Intentionally quiet.
+    }
+    clearAuthToken();
+    setStaff(null);
+    setSection('products');
+  }
+
   if (!ready) return <div className="booting" />;
-  if (!staff) return <Login onSignedIn={setStaff} />;
+  if (!staff) return <Login onSignedIn={handleSignedIn} />;
 
   return (
     <div className="shell">
@@ -32,14 +50,14 @@ export default function App() {
         active={section}
         onSelect={setSection}
         staff={staff}
-        onSignOut={() => setStaff(null)}
+        onSignOut={handleSignOut}
       />
 
       <main className="shell__main">
         {section === 'products' && <ProductsView onNotify={notify} />}
         {section === 'inventory' && <InventoryView staff={staff} onNotify={notify} />}
         {section === 'staff' && <StaffView staff={staff} onNotify={notify} />}
-        {section === 'drawer' && <DrawerPinsView staff={staff} onNotify={notify} />}
+        {section === 'drawer' && <DrawerPinsView onNotify={notify} />}
         {section === 'reports' && <ReportsView onNotify={notify} />}
       </main>
 

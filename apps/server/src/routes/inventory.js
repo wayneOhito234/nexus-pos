@@ -1,12 +1,14 @@
 import { Router } from 'express';
 import { pool } from '../db.js';
 import { managerIpGuard } from '../ipAllowlist.js';
+import { requireAuth, requireRole } from '../auth.js';
 import { checkLowStockAndAlert } from '../whatsapp.js';
 
 export const inventoryRouter = Router();
 
-// Everything here is manager-only.
-inventoryRouter.use(managerIpGuard);
+// Right machine, valid session, right role. Applied once here rather than
+// repeated on every route below.
+inventoryRouter.use(managerIpGuard, requireAuth, requireRole('manager', 'admin'));
 
 // ---------- Suppliers ----------
 
@@ -59,31 +61,32 @@ inventoryRouter.patch('/suppliers/:id', async (req, res) => {
   maybe('notes', notes);
   maybe('active', active);
 
-  if (fields.length === 0) return res.status(400).json({ error: 'nothing to update' });
+  if (fields.length === 0) return res.status(400).json({ error: 'Nothing to update' });
   values.push(req.params.id);
 
   const { rows } = await pool.query(
     `UPDATE suppliers SET ${fields.join(', ')} WHERE id = $${i} RETURNING *`,
     values
   );
-  if (rows.length === 0) return res.status(404).json({ error: 'supplier not found' });
+  if (rows.length === 0) return res.status(404).json({ error: 'Supplier not found' });
   res.json(rows[0]);
 });
 
 // ---------- Goods received ----------
 
 // POST /api/inventory/goods-received
-// body: { supplier_id, reference?, amount_paid?, notes?, received_by?,
+// body: { supplier_id, reference?, amount_paid?, notes?,
 //         items: [{ product_id, qty, unit_cost }] }
 //
 // Stock lands in the STORE, not on the shelf. A separate transfer puts it
-// out for sale, which is what makes the store-to-shelf authorisation real
+// out for sale, which is what makes the store-to-shelf step meaningful
 // rather than decorative.
 inventoryRouter.post('/goods-received', async (req, res) => {
-  const { supplier_id, reference, amount_paid, notes, received_by, items } = req.body;
+  const { supplier_id, reference, amount_paid, notes, items } = req.body;
+  const receivedBy = req.session.cashierId;
 
   if (!supplier_id || !Array.isArray(items) || items.length === 0) {
-    return res.status(400).json({ error: 'supplier_id and at least one item are required' });
+    return res.status(400).json({ error: 'A supplier and at least one item are required' });
   }
 
   const client = await pool.connect();
@@ -95,7 +98,7 @@ inventoryRouter.post('/goods-received', async (req, res) => {
     const { rows: grRows } = await client.query(
       `INSERT INTO goods_received (supplier_id, reference, total_cost, amount_paid, notes, received_by)
        VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-      [supplier_id, reference ?? null, totalCost, amount_paid ?? 0, notes ?? null, received_by ?? null]
+      [supplier_id, reference ?? null, totalCost, amount_paid ?? 0, notes ?? null, receivedBy]
     );
     const receipt = grRows[0];
 
@@ -118,9 +121,16 @@ inventoryRouter.post('/goods-received', async (req, res) => {
       ]);
 
       await client.query(
-        `INSERT INTO stock_movements (product_id, movement_type, qty_change, location, reason, reference_id, staff_id)
+        `INSERT INTO stock_movements
+           (product_id, movement_type, qty_change, location, reason, reference_id, staff_id)
          VALUES ($1, 'receipt', $2, 'store', $3, $4, $5)`,
-        [item.product_id, item.qty, reference ? `Delivery ${reference}` : 'Goods received', receipt.id, received_by ?? null]
+        [
+          item.product_id,
+          item.qty,
+          reference ? `Delivery ${reference}` : 'Goods received',
+          receipt.id,
+          receivedBy,
+        ]
       );
     }
 
@@ -155,7 +165,7 @@ inventoryRouter.get('/goods-received/:id', async (req, res) => {
      WHERE g.id = $1`,
     [req.params.id]
   );
-  if (header.length === 0) return res.status(404).json({ error: 'delivery not found' });
+  if (header.length === 0) return res.status(404).json({ error: 'Delivery not found' });
 
   const { rows: items } = await pool.query(
     `SELECT i.*, p.name AS product_name, p.sku
@@ -180,20 +190,21 @@ inventoryRouter.patch('/goods-received/:id/payment', async (req, res) => {
      RETURNING *, (total_cost - $1) AS balance_owed`,
     [amount_paid, req.params.id]
   );
-  if (rows.length === 0) return res.status(404).json({ error: 'delivery not found' });
+  if (rows.length === 0) return res.status(404).json({ error: 'Delivery not found' });
   res.json(rows[0]);
 });
 
 // ---------- Store to shelf ----------
 
 // POST /api/inventory/transfer
-// body: { product_id, qty, staff_id? }
+// body: { product_id, qty }
 inventoryRouter.post('/transfer', async (req, res) => {
-  const { product_id, qty, staff_id } = req.body;
+  const { product_id, qty } = req.body;
+  const staffId = req.session.cashierId;
   const amount = Number(qty);
 
   if (!product_id || !amount || amount <= 0) {
-    return res.status(400).json({ error: 'product_id and a positive qty are required' });
+    return res.status(400).json({ error: 'A product and a positive quantity are required' });
   }
 
   const client = await pool.connect();
@@ -204,7 +215,7 @@ inventoryRouter.post('/transfer', async (req, res) => {
       'SELECT name, store_qty FROM products WHERE id = $1 FOR UPDATE',
       [product_id]
     );
-    if (check.length === 0) throw Object.assign(new Error('product not found'), { status: 404 });
+    if (check.length === 0) throw Object.assign(new Error('Product not found'), { status: 404 });
 
     if (check[0].store_qty < amount) {
       throw Object.assign(
@@ -225,7 +236,7 @@ inventoryRouter.post('/transfer', async (req, res) => {
       `INSERT INTO stock_movements (product_id, movement_type, qty_change, location, reason, staff_id)
        VALUES ($1, 'transfer', $2, 'store', 'Moved to shelf', $3),
               ($1, 'transfer', $4, 'shelf', 'Received from store', $3)`,
-      [product_id, -amount, staff_id ?? null, amount]
+      [product_id, -amount, staffId, amount]
     );
 
     await client.query('COMMIT');
@@ -245,18 +256,19 @@ inventoryRouter.post('/transfer', async (req, res) => {
 // ---------- Adjustments ----------
 
 // POST /api/inventory/adjust
-// body: { product_id, location, qty_change, reason, staff_id? }
-// For damage, expiry, theft, and recount corrections. A reason is required,
+// body: { product_id, location, qty_change, reason }
+// For damage, expiry, theft and recount corrections. A reason is required,
 // because an unexplained stock change is the thing this table exists to stop.
 inventoryRouter.post('/adjust', async (req, res) => {
-  const { product_id, location, qty_change, reason, staff_id } = req.body;
+  const { product_id, location, qty_change, reason } = req.body;
+  const staffId = req.session.cashierId;
   const change = Number(qty_change);
 
   if (!product_id || !change || !reason?.trim()) {
-    return res.status(400).json({ error: 'product_id, qty_change and a reason are required' });
+    return res.status(400).json({ error: 'A product, a quantity change and a reason are required' });
   }
   if (!['store', 'shelf'].includes(location)) {
-    return res.status(400).json({ error: "location must be 'store' or 'shelf'" });
+    return res.status(400).json({ error: "Location must be 'store' or 'shelf'" });
   }
 
   const column = location === 'store' ? 'store_qty' : 'stock_qty';
@@ -266,12 +278,12 @@ inventoryRouter.post('/adjust', async (req, res) => {
      RETURNING id, sku, barcode, name, category, price, stock_qty, store_qty, reorder_level`,
     [change, product_id]
   );
-  if (rows.length === 0) return res.status(404).json({ error: 'product not found' });
+  if (rows.length === 0) return res.status(404).json({ error: 'Product not found' });
 
   await pool.query(
     `INSERT INTO stock_movements (product_id, movement_type, qty_change, location, reason, staff_id)
      VALUES ($1, 'adjustment', $2, $3, $4, $5)`,
-    [product_id, change, location, reason.trim(), staff_id ?? null]
+    [product_id, change, location, reason.trim(), staffId]
   );
 
   const io = req.app.get('io');
@@ -313,10 +325,10 @@ inventoryRouter.get('/roi', async (req, res) => {
   const { rows } = await pool.query(
     `SELECT
        p.id, p.name, p.sku, p.category, p.price, p.cost_price,
-       COALESCE(SUM(si.qty), 0)                                AS units_sold,
-       COALESCE(SUM(si.qty * si.price), 0)                     AS revenue,
-       COALESCE(SUM(si.qty * p.cost_price), 0)                 AS cost_of_goods,
-       COALESCE(SUM(si.qty * (si.price - p.cost_price)), 0)    AS gross_profit
+       COALESCE(SUM(si.qty), 0)                             AS units_sold,
+       COALESCE(SUM(si.qty * si.price), 0)                  AS revenue,
+       COALESCE(SUM(si.qty * p.cost_price), 0)              AS cost_of_goods,
+       COALESCE(SUM(si.qty * (si.price - p.cost_price)), 0) AS gross_profit
      FROM products p
      LEFT JOIN sale_items si ON si.product_id = p.id
      LEFT JOIN sales s ON s.id = si.sale_id AND s.created_at >= now() - ($1 || ' days')::interval

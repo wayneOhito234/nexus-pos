@@ -1,3 +1,28 @@
+
+### Latest Changes
+```bash
+psql -U postgres -d nexus_pos -c "ALTER TABLE products ADD COLUMN IF NOT EXISTS reorder_level INTEGER NOT NULL DEFAULT 10, ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT true, ADD COLUMN IF NOT EXISTS cost_price NUMERIC(10,2), ADD COLUMN IF NOT EXISTS store_qty INTEGER NOT NULL DEFAULT 0, ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now();"
+
+psql -U postgres -d nexus_pos -c "ALTER TABLE sales ADD COLUMN IF NOT EXISTS amount_received NUMERIC, ADD COLUMN IF NOT EXISTS change_given NUMERIC, ADD COLUMN IF NOT EXISTS cashier_id INTEGER REFERENCES cashiers(id);"
+
+psql -U postgres -d nexus_pos -c "CREATE TABLE IF NOT EXISTS drawer_events (id SERIAL PRIMARY KEY, cashier_id INTEGER REFERENCES cashiers(id), terminal_id TEXT NOT NULL, reason TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now());"
+
+psql -U postgres -d nexus_pos -c "CREATE TABLE IF NOT EXISTS drawer_pins (id SERIAL PRIMARY KEY, terminal_id TEXT NOT NULL, pin_hash TEXT NOT NULL, valid_for DATE NOT NULL, set_by INTEGER REFERENCES cashiers(id), created_at TIMESTAMPTZ NOT NULL DEFAULT now(), cleared_at TIMESTAMPTZ, UNIQUE (terminal_id, valid_for));"
+
+psql -U postgres -d nexus_pos -c "CREATE TABLE IF NOT EXISTS suppliers (id SERIAL PRIMARY KEY, name TEXT NOT NULL UNIQUE, contact_person TEXT, phone TEXT, email TEXT, notes TEXT, active BOOLEAN NOT NULL DEFAULT true, created_at TIMESTAMPTZ NOT NULL DEFAULT now());"
+
+psql -U postgres -d nexus_pos -c "CREATE TABLE IF NOT EXISTS goods_received (id SERIAL PRIMARY KEY, supplier_id INTEGER NOT NULL REFERENCES suppliers(id), reference TEXT, total_cost NUMERIC(12,2) NOT NULL DEFAULT 0, amount_paid NUMERIC(12,2) NOT NULL DEFAULT 0, notes TEXT, received_by INTEGER REFERENCES cashiers(id), received_at TIMESTAMPTZ NOT NULL DEFAULT now());"
+
+psql -U postgres -d nexus_pos -c "CREATE TABLE IF NOT EXISTS goods_received_items (id SERIAL PRIMARY KEY, goods_received_id INTEGER NOT NULL REFERENCES goods_received(id) ON DELETE CASCADE, product_id INTEGER NOT NULL REFERENCES products(id), qty INTEGER NOT NULL, unit_cost NUMERIC(10,2) NOT NULL);"
+
+psql -U postgres -d nexus_pos -c "CREATE TABLE IF NOT EXISTS stock_movements (id SERIAL PRIMARY KEY, product_id INTEGER NOT NULL REFERENCES products(id), movement_type TEXT NOT NULL, qty_change INTEGER NOT NULL, location TEXT NOT NULL, reason TEXT, reference_id INTEGER, staff_id INTEGER REFERENCES cashiers(id), created_at TIMESTAMPTZ NOT NULL DEFAULT now());"
+
+psql -U postgres -d nexus_pos -c "CREATE INDEX IF NOT EXISTS idx_movements_product ON stock_movements(product_id); CREATE INDEX IF NOT EXISTS idx_movements_created ON stock_movements(created_at DESC); CREATE INDEX IF NOT EXISTS idx_sales_cashier ON sales(cashier_id);"
+```
+```bash
+psql -U postgres -d nexus_pos -c "CREATE TABLE IF NOT EXISTS sessions (id SERIAL PRIMARY KEY, token_hash TEXT NOT NULL UNIQUE, cashier_id INTEGER NOT NULL REFERENCES cashiers(id), terminal_id TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), expires_at TIMESTAMPTZ NOT NULL, revoked_at TIMESTAMPTZ, last_seen_at TIMESTAMPTZ NOT NULL DEFAULT now());"
+```
+psql -U postgres -d nexus_pos -c "CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token_hash); CREATE INDEX IF NOT EXISTS idx_sessions_cashier ON sessions(cashier_id);"
 ```bash
 psql -U postgres -d nexus_pos -c "ALTER TABLE sales ADD COLUMN IF NOT EXISTS cashier_id INTEGER REFERENCES cashiers(id);"
 
@@ -58,6 +83,7 @@ CREATE INDEX IF NOT EXISTS idx_movements_created ON stock_movements(created_at D
 CREATE INDEX IF NOT EXISTS idx_received_supplier ON goods_received(supplier_id);
 SQL
 ```
+
 ```bash
 MPESA NUMBER
 254708374149

@@ -2,17 +2,33 @@ import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import { pool } from '../db.js';
 import { managerIpGuard, tillIpGuard } from '../ipAllowlist.js';
+import {
+  createSession,
+  revokeSession,
+  revokeAllForCashier,
+  revokeAllSessions,
+  requireAuth,
+  requireRole,
+} from '../auth.js';
 import { checkLowStockAndAlert } from '../whatsapp.js';
 
 export const managerRouter = Router();
 
+// Manager and admin functions need the right machine, a valid session, and
+// the right role. Each catches something the others miss: IP proves where,
+// the token proves who, the role proves what they may do.
+const managerOnly = [managerIpGuard, requireAuth, requireRole('manager', 'admin')];
+
 // ============================================================
-// Staff and sign-in
+// Sign-in
+//
+// These three routes are deliberately unauthenticated -- they have to work
+// before anyone has a session.
 // ============================================================
 
 // GET /api/manager/cashiers
-// The till login screen. Cashiers only, so manager and admin accounts
-// never appear on a till, and till machines only.
+// The till login screen. Cashiers only, so manager and admin accounts never
+// appear on a till.
 managerRouter.get('/cashiers', tillIpGuard, async (req, res) => {
   const { rows } = await pool.query(`
     SELECT
@@ -26,60 +42,10 @@ managerRouter.get('/cashiers', tillIpGuard, async (req, res) => {
   res.json(rows);
 });
 
-// GET /api/manager/staff
-// Everyone, for the manager app's own screens. Manager PC only.
-managerRouter.get('/staff', managerIpGuard, async (req, res) => {
-  const { rows } = await pool.query(`
-    SELECT
-      c.id, c.name, c.first_name, c.last_name, c.role,
-      s.id AS shift_id, s.terminal_id, s.clock_in
-    FROM cashiers c
-    LEFT JOIN shifts s ON s.cashier_id = c.id AND s.clock_out IS NULL
-    ORDER BY
-      CASE c.role WHEN 'admin' THEN 0 WHEN 'manager' THEN 1 ELSE 2 END,
-      c.name
-  `);
-  res.json(rows);
-});
-
-// POST /api/manager/cashiers/register
-// body: { first_name, last_name, password, role? }
-managerRouter.post('/cashiers/register', managerIpGuard, async (req, res) => {
-  const { first_name, last_name, password, role } = req.body;
-
-  if (!first_name || !last_name || !password) {
-    return res.status(400).json({ error: 'first_name, last_name and password are required' });
-  }
-  if (password.length < 4) {
-    return res.status(400).json({ error: 'password must be at least 4 characters' });
-  }
-
-  const fullName = `${first_name} ${last_name}`.trim();
-
-  const { rows: existing } = await pool.query(
-    'SELECT id FROM cashiers WHERE first_name = $1 AND last_name = $2',
-    [first_name, last_name]
-  );
-  if (existing.length > 0) {
-    return res.status(409).json({ error: 'a cashier with this name already exists' });
-  }
-
-  const passwordHash = await bcrypt.hash(password, 10);
-
-  const { rows } = await pool.query(
-    `INSERT INTO cashiers (name, first_name, last_name, password_hash, role)
-     VALUES ($1, $2, $3, $4, $5)
-     RETURNING id, name, first_name, last_name, role`,
-    [fullName, first_name, last_name, passwordHash, role || 'cashier']
-  );
-
-  res.status(201).json(rows[0]);
-});
-
 // POST /api/manager/cashiers/login
 // body: { first_name, last_name, password, terminal_id }
-// Till sign-in. Refuses manager and admin accounts outright, so hiding
-// them from the login screen is presentation and this is the actual rule.
+// Refuses manager and admin accounts outright, so hiding them from the
+// login screen is presentation and this is the actual rule.
 managerRouter.post('/cashiers/login', tillIpGuard, async (req, res) => {
   const { first_name, last_name, password, terminal_id } = req.body;
 
@@ -113,7 +79,7 @@ managerRouter.post('/cashiers/login', tillIpGuard, async (req, res) => {
     [cashier.id]
   );
   if (openShift.length > 0) {
-    return res.status(409).json({ error: 'you are already clocked in elsewhere' });
+    return res.status(409).json({ error: 'You are already clocked in elsewhere' });
   }
 
   const { rows: terminalOccupied } = await pool.query(
@@ -129,7 +95,9 @@ managerRouter.post('/cashiers/login', tillIpGuard, async (req, res) => {
     terminal_id,
   ]);
 
-  res.json({ id: cashier.id, name: cashier.name, role: cashier.role });
+  const token = await createSession(cashier.id, terminal_id);
+
+  res.json({ id: cashier.id, name: cashier.name, role: cashier.role, token });
 });
 
 // POST /api/manager/staff/login
@@ -162,11 +130,72 @@ managerRouter.post('/staff/login', managerIpGuard, async (req, res) => {
     return res.status(403).json({ error: 'Cashier accounts sign in at a till, not here.' });
   }
 
-  res.json({ id: staff.id, name: staff.name, role: staff.role });
+  const token = await createSession(staff.id, null);
+
+  res.json({ id: staff.id, name: staff.name, role: staff.role, token });
+});
+
+// POST /api/manager/signout
+managerRouter.post('/signout', requireAuth, async (req, res) => {
+  await revokeSession(req.session.token);
+  res.json({ ok: true });
+});
+
+// ============================================================
+// Staff management
+// ============================================================
+
+// GET /api/manager/staff
+managerRouter.get('/staff', ...managerOnly, async (req, res) => {
+  const { rows } = await pool.query(`
+    SELECT
+      c.id, c.name, c.first_name, c.last_name, c.role,
+      s.id AS shift_id, s.terminal_id, s.clock_in
+    FROM cashiers c
+    LEFT JOIN shifts s ON s.cashier_id = c.id AND s.clock_out IS NULL
+    ORDER BY
+      CASE c.role WHEN 'admin' THEN 0 WHEN 'manager' THEN 1 ELSE 2 END,
+      c.name
+  `);
+  res.json(rows);
+});
+
+// POST /api/manager/cashiers/register
+// body: { first_name, last_name, password, role? }
+managerRouter.post('/cashiers/register', ...managerOnly, async (req, res) => {
+  const { first_name, last_name, password, role } = req.body;
+
+  if (!first_name || !last_name || !password) {
+    return res.status(400).json({ error: 'first_name, last_name and password are required' });
+  }
+  if (password.length < 4) {
+    return res.status(400).json({ error: 'Password must be at least 4 characters' });
+  }
+
+  const fullName = `${first_name} ${last_name}`.trim();
+
+  const { rows: existing } = await pool.query(
+    'SELECT id FROM cashiers WHERE first_name = $1 AND last_name = $2',
+    [first_name, last_name]
+  );
+  if (existing.length > 0) {
+    return res.status(409).json({ error: 'Someone with that name already exists' });
+  }
+
+  const passwordHash = await bcrypt.hash(password, 10);
+
+  const { rows } = await pool.query(
+    `INSERT INTO cashiers (name, first_name, last_name, password_hash, role)
+     VALUES ($1, $2, $3, $4, $5)
+     RETURNING id, name, first_name, last_name, role`,
+    [fullName, first_name, last_name, passwordHash, role || 'cashier']
+  );
+
+  res.status(201).json(rows[0]);
 });
 
 // DELETE /api/manager/cashiers/:id
-managerRouter.delete('/cashiers/:id', managerIpGuard, async (req, res) => {
+managerRouter.delete('/cashiers/:id', ...managerOnly, async (req, res) => {
   const { id } = req.params;
 
   const { rows: openShift } = await pool.query(
@@ -174,37 +203,42 @@ managerRouter.delete('/cashiers/:id', managerIpGuard, async (req, res) => {
     [id]
   );
   if (openShift.length > 0) {
-    return res.status(409).json({ error: 'cannot delete a cashier who is currently clocked in' });
+    return res.status(409).json({ error: 'Clock them out before deleting the account' });
   }
 
+  await revokeAllForCashier(id);
+  await pool.query('DELETE FROM sessions WHERE cashier_id = $1', [id]);
   await pool.query('DELETE FROM shifts WHERE cashier_id = $1', [id]);
-  const { rows } = await pool.query('DELETE FROM cashiers WHERE id = $1 RETURNING id, name', [id]);
 
+  const { rows } = await pool.query('DELETE FROM cashiers WHERE id = $1 RETURNING id, name', [id]);
   if (rows.length === 0) {
-    return res.status(404).json({ error: 'cashier not found' });
+    return res.status(404).json({ error: 'Account not found' });
   }
 
   res.json({ deleted: rows[0] });
 });
 
 // PATCH /api/manager/cashiers/:id/role
-// The 'admin' role is intentionally never assignable through this endpoint.
-managerRouter.patch('/cashiers/:id/role', managerIpGuard, async (req, res) => {
+// The 'admin' role is intentionally never assignable here.
+managerRouter.patch('/cashiers/:id/role', ...managerOnly, async (req, res) => {
   const { id } = req.params;
   const { role } = req.body;
 
   if (!['cashier', 'manager'].includes(role)) {
-    return res.status(400).json({ error: "role must be 'cashier' or 'manager'" });
+    return res.status(400).json({ error: "Role must be 'cashier' or 'manager'" });
   }
 
   const { rows } = await pool.query(
     'UPDATE cashiers SET role = $1 WHERE id = $2 RETURNING id, name, role',
     [role, id]
   );
-
   if (rows.length === 0) {
-    return res.status(404).json({ error: 'cashier not found' });
+    return res.status(404).json({ error: 'Account not found' });
   }
+
+  // Their old session carries the old role, so end it. They sign in again
+  // with whatever access the new role actually grants.
+  await revokeAllForCashier(id);
 
   res.json(rows[0]);
 });
@@ -213,8 +247,7 @@ managerRouter.patch('/cashiers/:id/role', managerIpGuard, async (req, res) => {
 // Shifts
 // ============================================================
 
-// POST /api/manager/shifts/clock-in
-managerRouter.post('/shifts/clock-in', async (req, res) => {
+managerRouter.post('/shifts/clock-in', requireAuth, async (req, res) => {
   const { cashier_id, terminal_id } = req.body;
   if (!cashier_id || !terminal_id) {
     return res.status(400).json({ error: 'cashier_id and terminal_id are required' });
@@ -225,7 +258,7 @@ managerRouter.post('/shifts/clock-in', async (req, res) => {
     [cashier_id]
   );
   if (openShift.length > 0) {
-    return res.status(409).json({ error: 'cashier is already clocked in' });
+    return res.status(409).json({ error: 'Already clocked in' });
   }
 
   const { rows: terminalOccupied } = await pool.query(
@@ -243,8 +276,8 @@ managerRouter.post('/shifts/clock-in', async (req, res) => {
   res.status(201).json(rows[0]);
 });
 
-// POST /api/manager/shifts/clock-out
-managerRouter.post('/shifts/clock-out', async (req, res) => {
+// Ending a shift ends access too, rather than just closing a row.
+managerRouter.post('/shifts/clock-out', requireAuth, async (req, res) => {
   const { cashier_id } = req.body;
   if (!cashier_id) {
     return res.status(400).json({ error: 'cashier_id is required' });
@@ -257,24 +290,29 @@ managerRouter.post('/shifts/clock-out', async (req, res) => {
     [cashier_id]
   );
   if (rows.length === 0) {
-    return res.status(404).json({ error: 'no open shift found for this cashier' });
+    return res.status(404).json({ error: 'No open shift for that person' });
   }
+
+  await revokeAllForCashier(cashier_id);
+
   res.json(rows[0]);
 });
 
 // POST /api/manager/shifts/clock-out-all
-// Emergency reset: clocks out every currently-active shift at once.
-managerRouter.post('/shifts/clock-out-all', async (req, res) => {
+// Emergency reset. Ends every shift and every session at once.
+managerRouter.post('/shifts/clock-out-all', requireAuth, async (req, res) => {
   const { rows } = await pool.query(`
     UPDATE shifts SET clock_out = now()
     WHERE clock_out IS NULL
     RETURNING id, cashier_id
   `);
-  res.json({ clockedOut: rows.length });
+
+  const sessionsEnded = await revokeAllSessions();
+
+  res.json({ clockedOut: rows.length, sessionsEnded });
 });
 
-// GET /api/manager/shifts/history
-managerRouter.get('/shifts/history', managerIpGuard, async (req, res) => {
+managerRouter.get('/shifts/history', ...managerOnly, async (req, res) => {
   const { rows } = await pool.query(`
     SELECT s.id, c.name, c.role, s.terminal_id, s.clock_in, s.clock_out
     FROM shifts s
@@ -289,7 +327,7 @@ managerRouter.get('/shifts/history', managerIpGuard, async (req, res) => {
 // Sales history
 // ============================================================
 
-managerRouter.get('/sales/history', managerIpGuard, async (req, res) => {
+managerRouter.get('/sales/history', ...managerOnly, async (req, res) => {
   const { rows } = await pool.query(`
     SELECT s.id, s.terminal_id, s.payment_method, s.total, s.mpesa_ref, s.created_at,
            c.name AS cashier_name
@@ -330,7 +368,7 @@ function attemptState(terminalId) {
 // GET /api/manager/drawer/pins
 // Which tills have a PIN today. The PIN itself is never returned -- if the
 // manager forgets it, they set a new one.
-managerRouter.get('/drawer/pins', managerIpGuard, async (req, res) => {
+managerRouter.get('/drawer/pins', ...managerOnly, async (req, res) => {
   const { rows } = await pool.query(`
     SELECT d.terminal_id, d.created_at, c.name AS set_by_name
     FROM drawer_pins d
@@ -342,9 +380,9 @@ managerRouter.get('/drawer/pins', managerIpGuard, async (req, res) => {
 });
 
 // POST /api/manager/drawer/pin
-// body: { terminal_id, pin, set_by }
-managerRouter.post('/drawer/pin', managerIpGuard, async (req, res) => {
-  const { terminal_id, pin, set_by } = req.body;
+// body: { terminal_id, pin }
+managerRouter.post('/drawer/pin', ...managerOnly, async (req, res) => {
+  const { terminal_id, pin } = req.body;
 
   if (!terminal_id || !pin) {
     return res.status(400).json({ error: 'terminal_id and pin are required' });
@@ -364,7 +402,7 @@ managerRouter.post('/drawer/pin', managerIpGuard, async (req, res) => {
                    created_at = now(),
                    cleared_at = NULL
      RETURNING terminal_id, created_at`,
-    [terminal_id, pinHash, set_by ?? null]
+    [terminal_id, pinHash, req.session.cashierId]
   );
 
   // Setting a new PIN clears any lockout, so a manager fixing a forgotten
@@ -376,7 +414,7 @@ managerRouter.post('/drawer/pin', managerIpGuard, async (req, res) => {
 
 // DELETE /api/manager/drawer/pin/:terminalId
 // Ends drawer access for that till until a new PIN is set.
-managerRouter.delete('/drawer/pin/:terminalId', managerIpGuard, async (req, res) => {
+managerRouter.delete('/drawer/pin/:terminalId', ...managerOnly, async (req, res) => {
   const { rows } = await pool.query(
     `UPDATE drawer_pins SET cleared_at = now()
      WHERE terminal_id = $1 AND valid_for = CURRENT_DATE AND cleared_at IS NULL
@@ -393,12 +431,12 @@ managerRouter.delete('/drawer/pin/:terminalId', managerIpGuard, async (req, res)
 });
 
 // POST /api/manager/drawer/verify
-// body: { terminal_id, pin, cashier_id, reason }
+// body: { terminal_id, pin, reason }
 //
 // Verification and logging happen together on purpose. Separating them
 // would let a till log a drawer open without ever passing the check.
-managerRouter.post('/drawer/verify', tillIpGuard, async (req, res) => {
-  const { terminal_id, pin, cashier_id, reason } = req.body;
+managerRouter.post('/drawer/verify', tillIpGuard, requireAuth, async (req, res) => {
+  const { terminal_id, pin, reason } = req.body;
 
   if (!terminal_id || !pin || !reason) {
     return res.status(400).json({ error: 'terminal_id, pin and reason are required' });
@@ -445,17 +483,18 @@ managerRouter.post('/drawer/verify', tillIpGuard, async (req, res) => {
 
   pinAttempts.delete(terminal_id);
 
+  // The cashier comes from the session, not the request body.
   const { rows: event } = await pool.query(
     `INSERT INTO drawer_events (cashier_id, terminal_id, reason)
      VALUES ($1, $2, $3) RETURNING *`,
-    [cashier_id ?? null, terminal_id, reason]
+    [req.session.cashierId, terminal_id, reason]
   );
 
   res.json({ ok: true, event: event[0] });
 });
 
 // GET /api/manager/drawer/history
-managerRouter.get('/drawer/history', managerIpGuard, async (req, res) => {
+managerRouter.get('/drawer/history', ...managerOnly, async (req, res) => {
   const { rows } = await pool.query(`
     SELECT d.id, d.terminal_id, d.reason, d.created_at, c.name AS cashier_name
     FROM drawer_events d
@@ -470,9 +509,7 @@ managerRouter.get('/drawer/history', managerIpGuard, async (req, res) => {
 // Product management
 // ============================================================
 
-// GET /api/manager/products
-// Full catalogue including inactive items, which the till never sees.
-managerRouter.get('/products', managerIpGuard, async (req, res) => {
+managerRouter.get('/products', ...managerOnly, async (req, res) => {
   const { rows } = await pool.query(`
     SELECT id, sku, barcode, name, category, price, cost_price, stock_qty,
            store_qty, reorder_level, active, created_at
@@ -482,8 +519,7 @@ managerRouter.get('/products', managerIpGuard, async (req, res) => {
   res.json(rows);
 });
 
-// GET /api/manager/products/next-sku
-managerRouter.get('/products/next-sku', managerIpGuard, async (req, res) => {
+managerRouter.get('/products/next-sku', ...managerOnly, async (req, res) => {
   const { rows } = await pool.query(`
     SELECT sku FROM products
     WHERE sku ~ '^PRD-[0-9]+$'
@@ -495,8 +531,7 @@ managerRouter.get('/products/next-sku', managerIpGuard, async (req, res) => {
   res.json({ sku: `PRD-${String(lastNumber + 1).padStart(4, '0')}` });
 });
 
-// GET /api/manager/products/categories
-managerRouter.get('/products/categories', managerIpGuard, async (req, res) => {
+managerRouter.get('/products/categories', ...managerOnly, async (req, res) => {
   const { rows } = await pool.query(
     'SELECT DISTINCT category FROM products WHERE category IS NOT NULL ORDER BY category'
   );
@@ -505,14 +540,14 @@ managerRouter.get('/products/categories', managerIpGuard, async (req, res) => {
 
 // POST /api/manager/products
 // body: { sku, barcode, name, category, price, cost_price?, stock_qty?, reorder_level? }
-managerRouter.post('/products', managerIpGuard, async (req, res) => {
+managerRouter.post('/products', ...managerOnly, async (req, res) => {
   const { sku, barcode, name, category, price, cost_price, stock_qty, reorder_level } = req.body;
 
   if (!sku || !barcode || !name || !category || price === undefined) {
     return res.status(400).json({ error: 'sku, barcode, name, category and price are required' });
   }
   if (Number(price) < 0) {
-    return res.status(400).json({ error: 'price cannot be negative' });
+    return res.status(400).json({ error: 'Price cannot be negative' });
   }
 
   const { rows: clash } = await pool.query(
@@ -546,8 +581,7 @@ managerRouter.post('/products', managerIpGuard, async (req, res) => {
   res.status(201).json(rows[0]);
 });
 
-// PATCH /api/manager/products/:id/details
-managerRouter.patch('/products/:id/details', managerIpGuard, async (req, res) => {
+managerRouter.patch('/products/:id/details', ...managerOnly, async (req, res) => {
   const { id } = req.params;
   const { sku, barcode, name, category, price, cost_price, reorder_level } = req.body;
 
@@ -571,7 +605,7 @@ managerRouter.patch('/products/:id/details', managerIpGuard, async (req, res) =>
   maybe('reorder_level', reorder_level);
 
   if (fields.length === 0) {
-    return res.status(400).json({ error: 'nothing to update' });
+    return res.status(400).json({ error: 'Nothing to update' });
   }
 
   if (sku || barcode) {
@@ -593,7 +627,7 @@ managerRouter.patch('/products/:id/details', managerIpGuard, async (req, res) =>
   );
 
   if (rows.length === 0) {
-    return res.status(404).json({ error: 'product not found' });
+    return res.status(404).json({ error: 'Product not found' });
   }
 
   const io = req.app.get('io');
@@ -603,10 +637,9 @@ managerRouter.patch('/products/:id/details', managerIpGuard, async (req, res) =>
 });
 
 // PATCH /api/manager/products/:id/active
-// body: { active }
-// Soft delete. The product vanishes from the till but stays intact in
-// sales history, so old receipts and reports don't break.
-managerRouter.patch('/products/:id/active', managerIpGuard, async (req, res) => {
+// Soft delete. The product vanishes from the till but stays intact in sales
+// history, so old receipts and reports don't break.
+managerRouter.patch('/products/:id/active', ...managerOnly, async (req, res) => {
   const { id } = req.params;
   const { active } = req.body;
 
@@ -621,7 +654,7 @@ managerRouter.patch('/products/:id/active', managerIpGuard, async (req, res) => 
   );
 
   if (rows.length === 0) {
-    return res.status(404).json({ error: 'product not found' });
+    return res.status(404).json({ error: 'Product not found' });
   }
 
   const io = req.app.get('io');
@@ -631,15 +664,13 @@ managerRouter.patch('/products/:id/active', managerIpGuard, async (req, res) => 
 });
 
 // PATCH /api/manager/products/:id
-// body: { stock_qty?, price?, reorder_level? }
-// Quick inline edits. Manager-only, since price and stock changes are not
-// a cashier's job.
-managerRouter.patch('/products/:id', managerIpGuard, async (req, res) => {
+// Quick inline edits from the catalogue table.
+managerRouter.patch('/products/:id', ...managerOnly, async (req, res) => {
   const { id } = req.params;
   const { stock_qty, price, reorder_level } = req.body;
 
   if (stock_qty === undefined && price === undefined && reorder_level === undefined) {
-    return res.status(400).json({ error: 'provide stock_qty, price and/or reorder_level to update' });
+    return res.status(400).json({ error: 'Provide stock_qty, price and/or reorder_level' });
   }
 
   const fields = [];
@@ -667,7 +698,7 @@ managerRouter.patch('/products/:id', managerIpGuard, async (req, res) => {
   );
 
   if (rows.length === 0) {
-    return res.status(404).json({ error: 'product not found' });
+    return res.status(404).json({ error: 'Product not found' });
   }
 
   const io = req.app.get('io');

@@ -2,15 +2,21 @@ import { Router } from 'express';
 import { pool } from '../db.js';
 import { VAT_RATE, SOCKET_EVENTS } from '@nexus-pos/shared';
 import { tillIpGuard } from '../ipAllowlist.js';
+import { requireAuth } from '../auth.js';
 import { checkLowStockAndAlert } from '../whatsapp.js';
 
 export const salesRouter = Router();
 
-// Selling is a till function. The guard is what makes "the manager cannot
-// sell" actually true -- not a hidden button, but the server refusing the
-// request outright.
-salesRouter.post('/', tillIpGuard, async (req, res) => {
-  const { terminal_id, payment_method, mpesa_ref, items, amount_received, cashier_id } = req.body;
+// Selling needs a till machine and a signed-in cashier. The IP guard is
+// what makes "the manager cannot sell" true at the server rather than by
+// hiding a button.
+salesRouter.post('/', tillIpGuard, requireAuth, async (req, res) => {
+  const { terminal_id, payment_method, mpesa_ref, items, amount_received } = req.body;
+
+  // Identity comes from the verified session, never the request body. A
+  // till could otherwise attribute a sale to any cashier it named, which
+  // would make every report and shift reconciliation meaningless.
+  const cashierId = req.session.cashierId;
 
   if (!terminal_id || !payment_method || !Array.isArray(items) || items.length === 0) {
     return res.status(400).json({ error: 'terminal_id, payment_method and items are required' });
@@ -29,8 +35,9 @@ salesRouter.post('/', tillIpGuard, async (req, res) => {
         [product_id]
       );
       const product = rows[0];
+
       if (!product) {
-        throw Object.assign(new Error(`product ${product_id} not found`), { status: 400 });
+        throw Object.assign(new Error(`Product ${product_id} not found`), { status: 400 });
       }
       if (product.stock_qty < qty) {
         throw Object.assign(
@@ -38,6 +45,7 @@ salesRouter.post('/', tillIpGuard, async (req, res) => {
           { status: 409 }
         );
       }
+
       subtotal += Number(product.price) * qty;
       lineItems.push({ product_id, qty, price: product.price });
     }
@@ -48,14 +56,11 @@ salesRouter.post('/', tillIpGuard, async (req, res) => {
     let changeGiven = null;
     if (payment_method === 'cash' && amount_received !== undefined) {
       if (Number(amount_received) < total) {
-        throw Object.assign(new Error('amount received is less than the total due'), { status: 400 });
+        throw Object.assign(new Error('Amount received is less than the total due'), { status: 400 });
       }
       changeGiven = Number(amount_received) - total;
     }
 
-    // cashier_id is recorded on the sale itself rather than inferred later
-    // from overlapping shift windows, which guesses wrong whenever two
-    // cashiers share a till across a handover.
     const { rows: saleRows } = await client.query(
       `INSERT INTO sales
          (terminal_id, cashier_id, total, payment_method, mpesa_ref, amount_received, change_given)
@@ -64,7 +69,7 @@ salesRouter.post('/', tillIpGuard, async (req, res) => {
                  amount_received, change_given, created_at`,
       [
         terminal_id,
-        cashier_id ?? null,
+        cashierId,
         total,
         payment_method,
         mpesa_ref || null,
@@ -79,6 +84,7 @@ salesRouter.post('/', tillIpGuard, async (req, res) => {
         'INSERT INTO sale_items (sale_id, product_id, qty, price) VALUES ($1, $2, $3, $4)',
         [sale.id, item.product_id, item.qty, item.price]
       );
+
       await client.query(
         'UPDATE products SET stock_qty = stock_qty - $1 WHERE id = $2',
         [item.qty, item.product_id]
@@ -91,14 +97,15 @@ salesRouter.post('/', tillIpGuard, async (req, res) => {
         `INSERT INTO stock_movements
            (product_id, movement_type, qty_change, location, reason, reference_id, staff_id)
          VALUES ($1, 'sale', $2, 'shelf', $3, $4, $5)`,
-        [item.product_id, -item.qty, `Sale #${sale.id} on ${terminal_id}`, sale.id, cashier_id ?? null]
+        [item.product_id, -item.qty, `Sale #${sale.id} on ${terminal_id}`, sale.id, cashierId]
       );
     }
 
     await client.query('COMMIT');
 
     const { rows: updatedProducts } = await pool.query(
-      'SELECT id, sku, barcode, name, category, price, stock_qty, store_qty, reorder_level FROM products WHERE id = ANY($1)',
+      `SELECT id, sku, barcode, name, category, price, stock_qty, store_qty, reorder_level
+       FROM products WHERE id = ANY($1)`,
       [lineItems.map((item) => item.product_id)]
     );
 
