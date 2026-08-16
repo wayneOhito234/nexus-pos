@@ -1,45 +1,63 @@
 import { useEffect, useState } from 'react';
-import { Receipt as ReceiptIcon, TrendingUp } from 'lucide-react';
+import {
+  Receipt as ReceiptIcon, TrendingUp, BarChart2, Award, FileText, DollarSign,
+} from 'lucide-react';
 import {
   fetchBreakdown, fetchSalesHistory, fetchReceipt, fetchRoi, fetchDrawerHistory,
 } from '../api/client.js';
+import { BalanceSheetView } from './BalanceSheetView.jsx';
+import { TopPerformersView } from './TopPerformersView.jsx';
+import { InvoicesView }     from './InvoicesView.jsx';
 
-const kes = (v) => `KES ${Number(v || 0).toLocaleString('en-KE', { minimumFractionDigits: 2 })}`;
+const kes  = (v) => `KES ${Number(v || 0).toLocaleString('en-KE', { minimumFractionDigits: 2 })}`;
 const when = (iso) => new Date(iso).toLocaleString('en-KE', { dateStyle: 'medium', timeStyle: 'short' });
 
 const PERIODS = [
-  { id: 'day', label: 'Today' },
-  { id: 'week', label: 'This week' },
+  { id: 'day',   label: 'Today'      },
+  { id: 'week',  label: 'This week'  },
   { id: 'month', label: 'This month' },
 ];
 
 export function ReportsView({ onNotify }) {
   const [tab, setTab] = useState('sales');
 
+  const TABS = [
+    { id: 'sales',       label: 'Sales',         Icon: TrendingUp  },
+    { id: 'receipts',    label: 'Receipts',       Icon: ReceiptIcon },
+    { id: 'roi',         label: 'Margins',        Icon: BarChart2   },
+    { id: 'drawer',      label: 'Drawer log',     Icon: DollarSign  },
+    { id: 'balance',     label: 'Balance sheet',  Icon: BarChart2   },
+    { id: 'performers',  label: 'Top products',   Icon: Award       },
+    { id: 'invoices',    label: 'Invoices',       Icon: FileText    },
+  ];
+
   return (
     <div className="view">
       <header className="view__head">
         <h2>Reports</h2>
         <div className="tabs">
-          <button className={`tab ${tab === 'sales' ? 'is-active' : ''}`} onClick={() => setTab('sales')}>
-            <TrendingUp size={15} /> Sales
-          </button>
-          <button className={`tab ${tab === 'receipts' ? 'is-active' : ''}`} onClick={() => setTab('receipts')}>
-            <ReceiptIcon size={15} /> Receipts
-          </button>
-          <button className={`tab ${tab === 'roi' ? 'is-active' : ''}`} onClick={() => setTab('roi')}>
-            Product margins
-          </button>
-          <button className={`tab ${tab === 'drawer' ? 'is-active' : ''}`} onClick={() => setTab('drawer')}>
-            Drawer log
-          </button>
+          {TABS.map(({ id, label, Icon }) => (
+            <button
+              key={id}
+              className={`tab ${tab === id ? 'is-active' : ''}`}
+              onClick={() => setTab(id)}
+            >
+              <Icon size={14} /> {label}
+            </button>
+          ))}
         </div>
       </header>
 
-      {tab === 'sales' && <SalesBreakdown onNotify={onNotify} />}
-      {tab === 'receipts' && <Receipts onNotify={onNotify} />}
-      {tab === 'roi' && <Margins onNotify={onNotify} />}
-      {tab === 'drawer' && <DrawerLog onNotify={onNotify} />}
+      {/* Original tabs */}
+      {tab === 'sales'      && <SalesBreakdown  onNotify={onNotify} />}
+      {tab === 'receipts'   && <Receipts        onNotify={onNotify} />}
+      {tab === 'roi'        && <Margins         onNotify={onNotify} />}
+      {tab === 'drawer'     && <DrawerLog       onNotify={onNotify} />}
+
+      {/* ── New tabs ── */}
+      {tab === 'balance'    && <BalanceSheetView  onNotify={onNotify} />}
+      {tab === 'performers' && <TopPerformersView onNotify={onNotify} />}
+      {tab === 'invoices'   && <InvoicesView      onNotify={onNotify} />}
     </div>
   );
 }
@@ -218,7 +236,7 @@ function Margins({ onNotify }) {
       </div>
 
       <p className="panel__note">
-        Only products with a cost price appear here, since margin can't be worked out without one.
+        Only products with a cost price appear here, since margin can not be worked out without one.
       </p>
 
       <div className="ledger">

@@ -111,3 +111,10 @@ export const fetchDrawerHistory = () => get('/api/manager/drawer/history');
 // Reads the deployment's own configuration, so the manager app can show
 // which tills exist rather than having them hardcoded in a component.
 export const fetchSiteInfo = () => get('/api/site');
+
+// ---------- Analytics ----------
+export const fetchBalanceSheet  = (period = 'month') =>
+  get(`/api/analytics/balance-sheet?period=${period}`);
+
+export const fetchTopProducts   = (days = 30, limit = 10) =>
+  get(`/api/analytics/top-products?days=${days}&limit=${limit}`);
