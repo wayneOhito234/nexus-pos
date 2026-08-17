@@ -4,6 +4,7 @@ const { app, BrowserWindow, ipcMain, Menu } = require('electron');
 const { initDb, getCachedProducts, setCachedProducts, saveSaleLocally, getPendingSales, markSaleSynced, getPendingSyncCount } = require('./db');
 const { readConfig, writeConfig, isConfigured } = require('./config');
 const { vfdOpen, vfdClose, vfdWelcome, vfdItemAdded, vfdCheckout, vfdSaleComplete, vfdClear } = require('./vfd');
+const { openDrawer } = require('./drawer');
 
 // ── Boot logger ───────────────────────────────────────────────────────────────
 const logFile = path.join(__dirname, 'boot-debug.log');
@@ -102,6 +103,17 @@ ipcMain.handle('vfd:sale-complete', (_event, { changeGiven, paymentMethod }) => 
 });
 ipcMain.handle('vfd:welcome', () => vfdWelcome());
 ipcMain.handle('vfd:clear',   () => vfdClear());
+
+// ── Cash drawer IPC handler ───────────────────────────────────────────────────
+ipcMain.handle('drawer:open', async (_event, options) => {
+  try {
+    await openDrawer(options);
+    return { ok: true };
+  } catch (err) {
+    log(`drawer kick failed: ${err.message}`);
+    return { ok: false, error: err.message };
+  }
+});
 
 log('4: ipcMain handlers registered');
 

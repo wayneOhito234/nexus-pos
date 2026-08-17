@@ -7,10 +7,18 @@ const { app } = require('electron');
 // Survives app updates/reinstalls, unique per machine.
 const CONFIG_PATH = path.join(app.getPath('userData'), 'terminal.config.json');
 
+// Site-overridable defaults. Anything set in terminal.config.json wins;
+// unset keys fall back to these.
+const DEFAULTS = {
+  serverOrigin: 'http://localhost:4000',
+  drawerShareName: 'POS80C',
+  drawerPin: 2,
+};
+
 function readConfig() {
   try {
     const raw = fs.readFileSync(CONFIG_PATH, 'utf-8');
-    return JSON.parse(raw);
+    return { ...DEFAULTS, ...JSON.parse(raw) };
   } catch {
     return null;
   }
@@ -26,4 +34,4 @@ function isConfigured() {
   return !!(c && c.terminalId && c.serverOrigin);
 }
 
-module.exports = { readConfig, writeConfig, isConfigured };
+module.exports = { readConfig, writeConfig, isConfigured, DEFAULTS };

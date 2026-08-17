@@ -34,3 +34,8 @@ contextBridge.exposeInMainWorld('nexusVfd', {
   welcome:      () => ipcRenderer.invoke('vfd:welcome'),
   clear:        () => ipcRenderer.invoke('vfd:clear'),
 });
+
+// ── Cash drawer ───────────────────────────────────────────────────────────────
+contextBridge.exposeInMainWorld('nexusDrawer', {
+  open: (options) => ipcRenderer.invoke('drawer:open', options),
+});

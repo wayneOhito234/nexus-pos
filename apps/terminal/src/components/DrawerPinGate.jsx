@@ -23,6 +23,23 @@ export function DrawerPinGate({ title = 'Open Drawer (No Sale)', reason, cashier
         cashier_id: cashierId,
         reason,
       });
+
+      // The PIN is verified and the opening logged, so now actually open it.
+      // A failed kick is reported but doesn't undo the verification -- the
+      // event genuinely happened, and a cashier needs to know the drawer
+      // didn't move rather than the PIN being wrong.
+      const config = await window.nexusConfig?.read();
+      const result = await window.nexusDrawer?.open({
+        shareName: config?.drawerShareName,
+        pin: config?.drawerPin,
+      });
+
+      if (result && !result.ok) {
+        setError(`PIN accepted, but the drawer did not open. ${result.error}`);
+        setChecking(false);
+        return;
+      }
+
       onUnlock();
     } catch (err) {
       setError(err.message);

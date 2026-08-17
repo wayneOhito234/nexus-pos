@@ -260,6 +260,15 @@ export default function App() {
 
       const sale = await postSale(payload);
 
+      // Cash sale means cash goes in the drawer, so open it. No PIN here --
+      // the completed sale is the authorisation, and requiring one on every
+      // transaction would slow the queue for no security gain.
+      const config = await window.nexusConfig?.read();
+      window.nexusDrawer?.open({
+        shareName: config?.drawerShareName,
+        pin: config?.drawerPin,
+      }).catch(() => {});
+
       setReceipt(
         buildReceipt(sale, 'Cash', {
           amountReceived: sale.amount_received,
