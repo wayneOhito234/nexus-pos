@@ -74,8 +74,8 @@ export const clockOutStaff = (cashier_id) => post('/api/manager/shifts/clock-out
 
 // ---------- Terminals ----------
 export const fetchTerminals = () => get('/api/manager/terminals');
-export const setTerminalActive = (terminalId, active, reason) =>
-  patch(`/api/manager/terminals/${terminalId}`, { active, reason });
+export const setTerminalActive = (terminalId, active, reason, default_float) =>
+  patch(`/api/manager/terminals/${terminalId}`, { active, reason, default_float });
 
 // ---------- Products ----------
 export const fetchAllProducts = () => get('/api/manager/products');
@@ -121,6 +121,16 @@ export const fetchReceipt = (saleId) => get(`/api/analytics/receipt/${saleId}`);
 export const fetchSalesHistory = () => get('/api/manager/sales/history');
 export const fetchShiftHistory = () => get('/api/manager/shifts/history');
 export const fetchDrawerHistory = () => get('/api/manager/drawer/history');
+
+// ---------- Cash reconciliation ----------
+export const fetchReconciliation = (days = 7) =>
+  get(`/api/manager/shifts/reconciliation?days=${days}`);
+
+// ---------- Operational insights ----------
+export const fetchHourly = (days = 7) => get(`/api/analytics/hourly?days=${days}`);
+export const fetchSlowMovers = (days = 60) => get(`/api/analytics/slow-movers?days=${days}`);
+export const fetchStockValue = () => get('/api/analytics/stock-value');
+export const fetchShrinkage = (days = 30) => get(`/api/analytics/shrinkage?days=${days}`);
 
 // ---------- Site info ----------
 // Reads the deployment's own configuration, so components can show which
