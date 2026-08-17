@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { calcTotals, PAYMENT_METHODS, SOCKET_EVENTS } from '@nexus-pos/shared';
 import { TopBar } from './components/TopBar.jsx';
 import { SearchBar } from './components/SearchBar.jsx';
@@ -26,6 +26,7 @@ import {
 } from './api/client.js';
 import { connectSocket, getSocket } from './socket.js';
 import { loadTerminalId, getTerminalId } from './terminalId.js';
+import { vfd } from './vfd-hook.js';
 
 const BRANCH_NAME = 'Zummart Supermarket';
 
@@ -161,7 +162,29 @@ export default function App() {
     [cart]
   );
 
+  // Customer display (VFD) --------------------------------------------------
+  // lastScanRef remembers the product just scanned so the display can show its
+  // name; saleCompletingRef keeps clearing the cart after a sale from stomping
+  // the "thank you / change" screen with the welcome message.
+  const lastScanRef = useRef(null);
+  const saleCompletingRef = useRef(false);
+
+  // Keep the VFD in sync with the cart: empty cart -> welcome, otherwise show
+  // the latest scanned item and the running total.
+  useEffect(() => {
+    if (saleCompletingRef.current) return; // leave the thank-you/change screen up
+    if (cart.length === 0) {
+      vfd.welcome();
+      return;
+    }
+    const product = lastScanRef.current ?? cart[cart.length - 1].product;
+    vfd.itemAdded(product.name, product.price, total);
+  }, [cart, total]);
+
   function addToCart(product) {
+    // A new scan re-arms the display and remembers this product for the VFD.
+    saleCompletingRef.current = false;
+    lastScanRef.current = product;
     setCart((prev) => {
       const existing = prev.find((item) => item.product.id === product.id);
       const currentQty = existing?.qty || 0;
@@ -244,6 +267,8 @@ export default function App() {
         })
       );
 
+      saleCompletingRef.current = true;
+      vfd.saleComplete(sale.change_given ?? 0, 'cash');
       setCart([]);
       addToast(`Sale #${sale.id} complete, KES ${Number(sale.total).toFixed(2)}`, 'success');
     } catch (err) {
@@ -288,6 +313,8 @@ export default function App() {
       const sale = await postSale(payload);
 
       setReceipt(buildReceipt(sale, 'M-Pesa', { mpesaRef: finalStatus.mpesaRef }));
+      saleCompletingRef.current = true;
+      vfd.saleComplete(0, 'mpesa');
       setCart([]);
       setPaymentStatus(null);
       addToast(`Sale #${sale.id} complete, KES ${Number(sale.total).toFixed(2)}`, 'success');
