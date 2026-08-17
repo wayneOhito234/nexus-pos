@@ -1,5 +1,14 @@
 ```bash
 psql -U postgres -d nexus_pos -c "ALTER TABLE shifts ADD COLUMN IF NOT EXISTS opening_float NUMERIC(12,2) NOT NULL DEFAULT 0, ADD COLUMN IF NOT EXISTS counted_cash NUMERIC(12,2), ADD COLUMN IF NOT EXISTS expected_cash NUMERIC(12,2), ADD COLUMN IF NOT EXISTS counted_at TIMESTAMPTZ, ADD COLUMN IF NOT EXISTS count_notes TEXT;"
+```
+
+psql -U postgres -d nexus_pos -c "ALTER TABLE terminals ADD COLUMN IF NOT EXISTS default_float NUMERIC(12,2) NOT NULL DEFAULT 0;"
+
+psql -U postgres -d nexus_pos -c "CREATE INDEX IF NOT EXISTS idx_shifts_counted ON shifts(counted_at DESC);"
+
+
+```bash
+psql -U postgres -d nexus_pos -c "ALTER TABLE shifts ADD COLUMN IF NOT EXISTS opening_float NUMERIC(12,2) NOT NULL DEFAULT 0, ADD COLUMN IF NOT EXISTS counted_cash NUMERIC(12,2), ADD COLUMN IF NOT EXISTS expected_cash NUMERIC(12,2), ADD COLUMN IF NOT EXISTS counted_at TIMESTAMPTZ, ADD COLUMN IF NOT EXISTS count_notes TEXT;"
 
 psql -U postgres -d nexus_pos -c "ALTER TABLE terminals ADD COLUMN IF NOT EXISTS default_float NUMERIC(12,2) NOT NULL DEFAULT 0;"
 
