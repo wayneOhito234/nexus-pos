@@ -4,7 +4,7 @@ import cors from 'cors';
 import { createServer } from 'node:http';
 import { Server } from 'socket.io';
 import { pool } from './db.js';
-import { siteConfig } from './site.config.js';
+import { siteConfig } from '../site.config.js';
 import { ipAllowlist, managerIpGuard, mpesaCallbackAllowlist } from './ipAllowlist.js';
 import { productsRouter } from './routes/products.js';
 import { salesRouter } from './routes/sales.js';
