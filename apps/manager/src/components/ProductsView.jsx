@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Plus, Search, AlertTriangle, Archive, RotateCcw, Save, X } from 'lucide-react';
+import { Plus, Search, AlertTriangle, Archive, RotateCcw, Save, X, Pencil } from 'lucide-react';
 import {
   fetchAllProducts,
   fetchNextSku,
@@ -20,20 +20,24 @@ const EMPTY = {
 };
 
 export function ProductsView({ onNotify }) {
-  const [products, setProducts] = useState([]);
-  const [categories, setCategories] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [loadError, setLoadError] = useState('');
+  const [products, setProducts]       = useState([]);
+  const [categories, setCategories]   = useState([]);
+  const [loading, setLoading]         = useState(true);
+  const [loadError, setLoadError]     = useState('');
 
-  const [search, setSearch] = useState('');
+  const [search, setSearch]               = useState('');
   const [categoryFilter, setCategoryFilter] = useState('All');
-  const [showArchived, setShowArchived] = useState(false);
+  const [showArchived, setShowArchived]   = useState(false);
 
-  const [mode, setMode] = useState('idle');
-  const [draft, setDraft] = useState(EMPTY);
+  const [mode, setMode]         = useState('idle');
+  const [draft, setDraft]       = useState(EMPTY);
   const [editingId, setEditingId] = useState(null);
   const [formError, setFormError] = useState('');
-  const [saving, setSaving] = useState(false);
+  const [saving, setSaving]     = useState(false);
+
+  // Inline confirm state — replaces window.confirm() so Electron
+  // never opens a native blocking dialog that freezes focus.
+  const [confirmingId, setConfirmingId] = useState(null);
 
   useEffect(() => { loadAll(); }, []);
 
@@ -70,27 +74,36 @@ export function ProductsView({ onNotify }) {
     [products]
   );
 
+  // FIX: fetch the SKU first, then render the form once with all data.
+  // Previously it rendered with EMPTY then called setDraft again when the
+  // SKU arrived, causing a double-render that disrupted input focus.
   async function startCreate() {
     setFormError('');
     setEditingId(null);
-    setMode('create');
-    setDraft(EMPTY);
+    let sku = '';
     try {
-      const { sku } = await fetchNextSku();
-      setDraft((d) => ({ ...d, sku }));
+      const result = await fetchNextSku();
+      sku = result.sku ?? '';
     } catch {
-      // A blank SKU is recoverable, the manager can type one.
+      // A blank SKU is recoverable — the manager can type one.
     }
+    setDraft({ ...EMPTY, sku });
+    setMode('create');
   }
 
   function startEdit(p) {
+    setConfirmingId(null);
     setFormError('');
     setMode('edit');
     setEditingId(p.id);
     setDraft({
-      sku: p.sku ?? '', barcode: p.barcode ?? '', name: p.name ?? '',
-      category: p.category ?? '', price: p.price ?? '',
-      cost_price: p.cost_price ?? '', stock_qty: p.stock_qty ?? '',
+      sku:           p.sku          ?? '',
+      barcode:       p.barcode      ?? '',
+      name:          p.name         ?? '',
+      category:      p.category     ?? '',
+      price:         p.price        ?? '',
+      cost_price:    p.cost_price   ?? '',
+      stock_qty:     p.stock_qty    ?? '',
       reorder_level: p.reorder_level ?? '',
     });
   }
@@ -105,14 +118,14 @@ export function ProductsView({ onNotify }) {
   const set = (field, value) => setDraft((d) => ({ ...d, [field]: value }));
 
   function validate() {
-    if (!draft.name.trim()) return 'Give the product a name.';
-    if (!draft.sku.trim()) return 'Every product needs a SKU.';
-    if (!draft.barcode.trim()) return 'Enter a barcode so this can be scanned at the till.';
+    if (!draft.name.trim())     return 'Give the product a name.';
+    if (!draft.sku.trim())      return 'Every product needs a SKU.';
+    if (!draft.barcode.trim())  return 'Enter a barcode so this can be scanned at the till.';
     if (!draft.category.trim()) return 'Choose or type a category.';
-    if (draft.price === '' || Number(draft.price) < 0) return 'Enter a selling price of zero or more.';
-    if (draft.cost_price !== '' && Number(draft.cost_price) > Number(draft.price)) {
+    if (draft.price === '' || Number(draft.price) < 0)
+      return 'Enter a selling price of zero or more.';
+    if (draft.cost_price !== '' && Number(draft.cost_price) > Number(draft.price))
       return 'Cost is higher than the selling price. Check both figures.';
-    }
     return '';
   }
 
@@ -125,12 +138,12 @@ export function ProductsView({ onNotify }) {
     setFormError('');
 
     const payload = {
-      sku: draft.sku.trim(),
-      barcode: draft.barcode.trim(),
-      name: draft.name.trim(),
-      category: draft.category.trim(),
-      price: Number(draft.price),
-      cost_price: draft.cost_price === '' ? null : Number(draft.cost_price),
+      sku:           draft.sku.trim(),
+      barcode:       draft.barcode.trim(),
+      name:          draft.name.trim(),
+      category:      draft.category.trim(),
+      price:         Number(draft.price),
+      cost_price:    draft.cost_price === '' ? null : Number(draft.cost_price),
       reorder_level: draft.reorder_level === '' ? 10 : Number(draft.reorder_level),
     };
 
@@ -159,17 +172,20 @@ export function ProductsView({ onNotify }) {
     }
   }
 
-  async function toggleArchive(p) {
-    const archiving = p.active;
-    const msg = archiving
-      ? `Archive ${p.name}? It will disappear from both tills but stay in past sales.`
-      : `Bring ${p.name} back to the tills?`;
-    if (!window.confirm(msg)) return;
+  // FIX: no window.confirm(). Sets confirmingId so the row shows
+  // inline confirm/cancel buttons instead of a blocking native dialog.
+  function requestArchive(p, e) {
+    e.stopPropagation();
+    setConfirmingId(p.id);
+  }
 
+  async function confirmArchive(p, e) {
+    e.stopPropagation();
+    setConfirmingId(null);
     try {
       const updated = await setProductActive(p.id, !p.active);
       setProducts((prev) => prev.map((x) => (x.id === updated.id ? { ...x, ...updated } : x)));
-      onNotify?.(archiving ? `${updated.name} archived` : `${updated.name} restored`, 'info');
+      onNotify?.(p.active ? `${updated.name} archived` : `${updated.name} restored`, 'info');
       if (editingId === p.id) cancel();
     } catch (err) {
       onNotify?.(err.message, 'error');
@@ -188,6 +204,7 @@ export function ProductsView({ onNotify }) {
       </header>
 
       <div className="catalogue">
+        {/* ── Left: product list ── */}
         <div className="catalogue__list-pane">
           <div className="catalogue__toolbar">
             <div className="catalogue__search">
@@ -253,16 +270,17 @@ export function ProductsView({ onNotify }) {
               </div>
 
               {visible.map((p) => {
-                const low = p.stock_qty <= p.reorder_level;
+                const low        = p.stock_qty <= p.reorder_level;
+                const confirming = confirmingId === p.id;
+
                 return (
                   <div
                     key={p.id}
                     className={[
                       'catalogue__row',
                       editingId === p.id ? 'catalogue__row--selected' : '',
-                      !p.active ? 'catalogue__row--archived' : '',
+                      !p.active           ? 'catalogue__row--archived'  : '',
                     ].join(' ')}
-                    onClick={() => startEdit(p)}
                   >
                     <span className="catalogue__cell-product">
                       <strong>{p.name}</strong>
@@ -281,13 +299,48 @@ export function ProductsView({ onNotify }) {
 
                     <span className="catalogue__cell-stock muted">{p.store_qty ?? 0}</span>
 
-                    <button
-                      className="catalogue__archive-btn"
-                      title={p.active ? 'Archive' : 'Restore'}
-                      onClick={(e) => { e.stopPropagation(); toggleArchive(p); }}
-                    >
-                      {p.active ? <Archive size={14} /> : <RotateCcw size={14} />}
-                    </button>
+                    {/* Row actions */}
+                    <span className="catalogue__row-actions">
+                      {confirming ? (
+                        // Inline confirm — no native dialog, no focus freeze
+                        <>
+                          <span className="catalogue__confirm-label">
+                            {p.active ? 'Archive?' : 'Restore?'}
+                          </span>
+                          <button
+                            className="catalogue__confirm-yes"
+                            onClick={(e) => confirmArchive(p, e)}
+                          >
+                            Yes
+                          </button>
+                          <button
+                            className="catalogue__confirm-no"
+                            onClick={(e) => { e.stopPropagation(); setConfirmingId(null); }}
+                          >
+                            No
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          {/* Edit button — explicit, does not rely on clicking the row */}
+                          <button
+                            className="catalogue__edit-btn"
+                            title="Edit product"
+                            onClick={(e) => { e.stopPropagation(); startEdit(p); }}
+                          >
+                            <Pencil size={13} />
+                          </button>
+
+                          <button
+                            className="catalogue__archive-btn"
+                            title={p.active ? 'Archive' : 'Restore'}
+                            onClick={(e) => requestArchive(p, e)}
+                          >
+                            {p.active ? <Archive size={14} /> : <RotateCcw size={14} />}
+                          </button>
+                        </>
+                      )}
+                    </span>
                   </div>
                 );
               })}
@@ -295,13 +348,15 @@ export function ProductsView({ onNotify }) {
           )}
         </div>
 
+        {/* ── Right: form pane ── */}
         <div className="catalogue__form-pane">
           {mode === 'idle' ? (
             <div className="catalogue__placeholder">
               <p className="catalogue__placeholder-title">Pick a product to edit</p>
               <p className="catalogue__placeholder-body">
-                Or add something new. {products.filter((p) => p.active).length} products are live
-                on the tills right now.
+                Click the <Pencil size={12} style={{ verticalAlign: 'middle' }} /> button on any
+                row, or add something new.{' '}
+                {products.filter((p) => p.active).length} products are live on the tills right now.
               </p>
               <button onClick={startCreate}><Plus size={15} /> New product</button>
             </div>
