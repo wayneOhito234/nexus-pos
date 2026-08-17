@@ -9,14 +9,7 @@
   "scripts": {
     "dev:server": "npm run dev -w @nexus-pos/server",
     "dev:terminal": "npm run dev -w @nexus-pos/terminal",
+    "dev:manager": "npm run dev -w @nexus-pos/manager",
     "seed": "npm run seed -w @nexus-pos/server"
-  },
-  "devDependencies": {
-    "@vitejs/plugin-react": "^6.0.5",
-    "vite": "^8.2.1"
-  },
-  "dependencies": {
-    "react": "^19.2.8",
-    "react-dom": "^19.2.8"
   }
 }
