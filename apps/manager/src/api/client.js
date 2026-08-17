@@ -59,23 +59,33 @@ const post = (path, body) => request(path, { method: 'POST', body: JSON.stringif
 const patch = (path, body) => request(path, { method: 'PATCH', body: JSON.stringify(body) });
 const del = (path) => request(path, { method: 'DELETE' });
 
-// ---------- Auth and staff ----------
+// ---------- Auth ----------
 export const staffLogin = (creds) => post('/api/manager/staff/login', creds);
 export const signOut = () => post('/api/manager/signout', {});
+
+// ---------- Staff ----------
 export const fetchStaff = () => get('/api/manager/staff');
 export const registerStaff = (data) => post('/api/manager/cashiers/register', data);
 export const updateStaffRole = (id, role) => patch(`/api/manager/cashiers/${id}/role`, { role });
+export const setStaffActive = (id, active) => patch(`/api/manager/cashiers/${id}/active`, { active });
 export const deleteStaff = (id) => del(`/api/manager/cashiers/${id}`);
 export const clockOutAll = () => post('/api/manager/shifts/clock-out-all', {});
 export const clockOutStaff = (cashier_id) => post('/api/manager/shifts/clock-out', { cashier_id });
+
+// ---------- Terminals ----------
+export const fetchTerminals = () => get('/api/manager/terminals');
+export const setTerminalActive = (terminalId, active, reason) =>
+  patch(`/api/manager/terminals/${terminalId}`, { active, reason });
 
 // ---------- Products ----------
 export const fetchAllProducts = () => get('/api/manager/products');
 export const fetchNextSku = () => get('/api/manager/products/next-sku');
 export const fetchCategories = () => get('/api/manager/products/categories');
 export const createProduct = (p) => post('/api/manager/products', p);
-export const updateProductDetails = (id, changes) => patch(`/api/manager/products/${id}/details`, changes);
-export const setProductActive = (id, active) => patch(`/api/manager/products/${id}/active`, { active });
+export const updateProductDetails = (id, changes) =>
+  patch(`/api/manager/products/${id}/details`, changes);
+export const setProductActive = (id, active) =>
+  patch(`/api/manager/products/${id}/active`, { active });
 export const adjustProduct = (id, changes) => patch(`/api/manager/products/${id}`, changes);
 
 // ---------- Inventory ----------
@@ -99,22 +109,20 @@ export const setDrawerPin = (terminal_id, pin) =>
   post('/api/manager/drawer/pin', { terminal_id, pin });
 export const clearDrawerPin = (terminalId) => del(`/api/manager/drawer/pin/${terminalId}`);
 
-// ---------- Reporting ----------
+// ---------- Reporting and analytics ----------
+export const fetchDashboard = () => get('/api/analytics/dashboard');
 export const fetchAnalyticsSummary = () => get('/api/analytics/summary');
 export const fetchBreakdown = (period = 'day') => get(`/api/analytics/breakdown?period=${period}`);
+export const fetchBalanceSheet = (period = 'month') =>
+  get(`/api/analytics/balance-sheet?period=${period}`);
+export const fetchTopProducts = (days = 30, limit = 10) =>
+  get(`/api/analytics/top-products?days=${days}&limit=${limit}`);
 export const fetchReceipt = (saleId) => get(`/api/analytics/receipt/${saleId}`);
 export const fetchSalesHistory = () => get('/api/manager/sales/history');
 export const fetchShiftHistory = () => get('/api/manager/shifts/history');
 export const fetchDrawerHistory = () => get('/api/manager/drawer/history');
 
 // ---------- Site info ----------
-// Reads the deployment's own configuration, so the manager app can show
-// which tills exist rather than having them hardcoded in a component.
+// Reads the deployment's own configuration, so components can show which
+// tills exist rather than having them hardcoded.
 export const fetchSiteInfo = () => get('/api/site');
-
-// ---------- Analytics ----------
-export const fetchBalanceSheet  = (period = 'month') =>
-  get(`/api/analytics/balance-sheet?period=${period}`);
-
-export const fetchTopProducts   = (days = 30, limit = 10) =>
-  get(`/api/analytics/top-products?days=${days}&limit=${limit}`);

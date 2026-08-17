@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import bcrypt from 'bcryptjs';
 import { pool } from '../db.js';
+import { siteConfig } from '../site.config.js';
 import { managerIpGuard, tillIpGuard } from '../ipAllowlist.js';
 import {
   createSession,
@@ -22,13 +23,13 @@ const managerOnly = [managerIpGuard, requireAuth, requireRole('manager', 'admin'
 // ============================================================
 // Sign-in
 //
-// These three routes are deliberately unauthenticated -- they have to work
-// before anyone has a session.
+// These routes are deliberately unauthenticated -- they have to work before
+// anyone has a session.
 // ============================================================
 
 // GET /api/manager/cashiers
-// The till login screen. Cashiers only, so manager and admin accounts never
-// appear on a till.
+// The till login screen. Active cashiers only, so manager and admin accounts
+// never appear on a till and a deactivated cashier disappears from it.
 managerRouter.get('/cashiers', tillIpGuard, async (req, res) => {
   const { rows } = await pool.query(`
     SELECT
@@ -36,7 +37,7 @@ managerRouter.get('/cashiers', tillIpGuard, async (req, res) => {
       s.id AS shift_id, s.terminal_id, s.clock_in
     FROM cashiers c
     LEFT JOIN shifts s ON s.cashier_id = c.id AND s.clock_out IS NULL
-    WHERE c.role = 'cashier'
+    WHERE c.role = 'cashier' AND c.active = true
     ORDER BY c.name
   `);
   res.json(rows);
@@ -68,9 +69,26 @@ managerRouter.post('/cashiers/login', tillIpGuard, async (req, res) => {
     return res.status(401).json({ error: 'Wrong name or password' });
   }
 
+  if (!cashier.active) {
+    return res.status(403).json({ error: 'This account has been deactivated. Speak to the manager.' });
+  }
+
   if (cashier.role !== 'cashier') {
     return res.status(403).json({
       error: 'Manager accounts sign in on the manager terminal, not a till.',
+    });
+  }
+
+  // A till taken out of service cannot trade, whoever signs in on it.
+  const { rows: terminal } = await pool.query(
+    'SELECT active, disabled_reason FROM terminals WHERE terminal_id = $1',
+    [terminal_id]
+  );
+  if (terminal.length > 0 && !terminal[0].active) {
+    return res.status(403).json({
+      error: terminal[0].disabled_reason
+        ? `This till is out of service: ${terminal[0].disabled_reason}`
+        : 'This till has been taken out of service.',
     });
   }
 
@@ -126,6 +144,10 @@ managerRouter.post('/staff/login', managerIpGuard, async (req, res) => {
     return res.status(401).json({ error: 'Wrong name or password' });
   }
 
+  if (!staff.active) {
+    return res.status(403).json({ error: 'This account has been deactivated.' });
+  }
+
   if (staff.role === 'cashier') {
     return res.status(403).json({ error: 'Cashier accounts sign in at a till, not here.' });
   }
@@ -145,15 +167,15 @@ managerRouter.post('/signout', requireAuth, async (req, res) => {
 // Staff management
 // ============================================================
 
-// GET /api/manager/staff
 managerRouter.get('/staff', ...managerOnly, async (req, res) => {
   const { rows } = await pool.query(`
     SELECT
-      c.id, c.name, c.first_name, c.last_name, c.role,
+      c.id, c.name, c.first_name, c.last_name, c.role, c.active,
       s.id AS shift_id, s.terminal_id, s.clock_in
     FROM cashiers c
     LEFT JOIN shifts s ON s.cashier_id = c.id AND s.clock_out IS NULL
     ORDER BY
+      c.active DESC,
       CASE c.role WHEN 'admin' THEN 0 WHEN 'manager' THEN 1 ELSE 2 END,
       c.name
   `);
@@ -187,24 +209,69 @@ managerRouter.post('/cashiers/register', ...managerOnly, async (req, res) => {
   const { rows } = await pool.query(
     `INSERT INTO cashiers (name, first_name, last_name, password_hash, role)
      VALUES ($1, $2, $3, $4, $5)
-     RETURNING id, name, first_name, last_name, role`,
+     RETURNING id, name, first_name, last_name, role, active`,
     [fullName, first_name, last_name, passwordHash, role || 'cashier']
   );
 
   res.status(201).json(rows[0]);
 });
 
+// PATCH /api/manager/cashiers/:id/active
+// body: { active }
+//
+// Deactivation is the usual way to remove someone -- shift history and sales
+// attribution survive, which deletion sacrifices. Admin accounts cannot be
+// deactivated here, for the same reason admin cannot be granted here.
+managerRouter.patch('/cashiers/:id/active', ...managerOnly, async (req, res) => {
+  const { id } = req.params;
+  const { active } = req.body;
+
+  if (typeof active !== 'boolean') {
+    return res.status(400).json({ error: 'active must be true or false' });
+  }
+  if (Number(id) === req.session.cashierId) {
+    return res.status(409).json({ error: 'You cannot deactivate your own account.' });
+  }
+
+  const { rows: target } = await pool.query('SELECT role FROM cashiers WHERE id = $1', [id]);
+  if (target.length === 0) return res.status(404).json({ error: 'Account not found' });
+  if (target[0].role === 'admin') {
+    return res.status(403).json({ error: 'Admin accounts cannot be deactivated from here.' });
+  }
+
+  const { rows } = await pool.query(
+    'UPDATE cashiers SET active = $1 WHERE id = $2 RETURNING id, name, role, active',
+    [active, id]
+  );
+
+  if (!active) {
+    // End any open shift and revoke access, otherwise they carry on working
+    // until they happen to sign out.
+    await pool.query(
+      'UPDATE shifts SET clock_out = now() WHERE cashier_id = $1 AND clock_out IS NULL',
+      [id]
+    );
+    await revokeAllForCashier(id);
+  }
+
+  res.json(rows[0]);
+});
+
 // DELETE /api/manager/cashiers/:id
 //
-// A real, permanent delete. Sessions and shifts are cleared explicitly
-// first since those rows shouldn't outlive the account at all. Everything
-// else that references this cashier (drawer_events, sales, stock_movements,
-// goods_received.received_by) is set up with ON DELETE SET NULL at the
-// database level, so old records keep existing for reporting but just lose
-// the name -- the same fallback the UI already shows for those. The
-// try/catch below is a safety net in case some other reference was missed.
+// A real, permanent delete. Sessions and shifts are cleared explicitly first
+// since those rows shouldn't outlive the account. Everything else that
+// references this cashier is set to ON DELETE SET NULL at the database
+// level, so old records keep existing for reporting but lose the name.
+//
+// Deactivating is almost always the better choice -- this exists for
+// genuine mistakes, like an account created in error.
 managerRouter.delete('/cashiers/:id', ...managerOnly, async (req, res) => {
   const { id } = req.params;
+
+  if (Number(id) === req.session.cashierId) {
+    return res.status(409).json({ error: 'You cannot delete your own account.' });
+  }
 
   const { rows: openShift } = await pool.query(
     'SELECT id FROM shifts WHERE cashier_id = $1 AND clock_out IS NULL',
@@ -227,7 +294,7 @@ managerRouter.delete('/cashiers/:id', ...managerOnly, async (req, res) => {
   } catch (err) {
     if (err.code === '23503') {
       return res.status(409).json({
-        error: `This account still has related records blocking deletion (${err.constraint || 'unknown constraint'}). Run the cashier foreign-key migration, or clear that history first.`,
+        error: `This account still has related records blocking deletion (${err.constraint || 'unknown constraint'}). Deactivate them instead, or run the cashier foreign-key migration.`,
       });
     }
     throw err;
@@ -244,17 +311,103 @@ managerRouter.patch('/cashiers/:id/role', ...managerOnly, async (req, res) => {
     return res.status(400).json({ error: "Role must be 'cashier' or 'manager'" });
   }
 
+  const { rows: target } = await pool.query('SELECT role FROM cashiers WHERE id = $1', [id]);
+  if (target.length === 0) return res.status(404).json({ error: 'Account not found' });
+  if (target[0].role === 'admin') {
+    return res.status(403).json({ error: 'An admin account cannot be demoted from here.' });
+  }
+
   const { rows } = await pool.query(
-    'UPDATE cashiers SET role = $1 WHERE id = $2 RETURNING id, name, role',
+    'UPDATE cashiers SET role = $1 WHERE id = $2 RETURNING id, name, role, active',
     [role, id]
   );
-  if (rows.length === 0) {
-    return res.status(404).json({ error: 'Account not found' });
-  }
 
   // Their old session carries the old role, so end it. They sign in again
   // with whatever access the new role actually grants.
   await revokeAllForCashier(id);
+
+  res.json(rows[0]);
+});
+
+// ============================================================
+// Terminals
+//
+// site.config.js decides which machines are tills. This decides whether each
+// is currently allowed to trade, which needs to survive a restart and be
+// changeable without editing a file and redeploying.
+// ============================================================
+
+managerRouter.get('/terminals', ...managerOnly, async (req, res) => {
+  const configured = siteConfig.tillIps.map((ip, i) => ({
+    terminal_id: `till-${i + 1}`,
+    ip,
+  }));
+
+  const { rows } = await pool.query(`
+    SELECT t.terminal_id, t.label, t.active, t.disabled_reason, t.disabled_at,
+           c.name AS disabled_by_name
+    FROM terminals t
+    LEFT JOIN cashiers c ON c.id = t.disabled_by
+  `);
+  const state = new Map(rows.map((r) => [r.terminal_id, r]));
+
+  const { rows: onDuty } = await pool.query(`
+    SELECT s.terminal_id, c.name AS cashier_name
+    FROM shifts s JOIN cashiers c ON c.id = s.cashier_id
+    WHERE s.clock_out IS NULL
+  `);
+  const busy = new Map(onDuty.map((r) => [r.terminal_id, r.cashier_name]));
+
+  res.json(
+    configured.map((t) => ({
+      ...t,
+      ...(state.get(t.terminal_id) || { active: true, label: null }),
+      current_cashier: busy.get(t.terminal_id) || null,
+    }))
+  );
+});
+
+// PATCH /api/manager/terminals/:terminalId
+// body: { active, reason?, label? }
+managerRouter.patch('/terminals/:terminalId', ...managerOnly, async (req, res) => {
+  const { terminalId } = req.params;
+  const { active, reason, label } = req.body;
+
+  if (typeof active !== 'boolean') {
+    return res.status(400).json({ error: 'active must be true or false' });
+  }
+
+  const { rows } = await pool.query(
+    `INSERT INTO terminals (terminal_id, label, active, disabled_reason, disabled_by, disabled_at)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     ON CONFLICT (terminal_id) DO UPDATE SET
+       label = COALESCE(EXCLUDED.label, terminals.label),
+       active = EXCLUDED.active,
+       disabled_reason = EXCLUDED.disabled_reason,
+       disabled_by = EXCLUDED.disabled_by,
+       disabled_at = EXCLUDED.disabled_at
+     RETURNING *`,
+    [
+      terminalId,
+      label ?? null,
+      active,
+      active ? null : (reason?.trim() || null),
+      active ? null : req.session.cashierId,
+      active ? null : new Date(),
+    ]
+  );
+
+  if (!active) {
+    // Clear the till, so nobody is left mid-shift on a machine that can no
+    // longer sell.
+    const { rows: ended } = await pool.query(
+      `UPDATE shifts SET clock_out = now()
+       WHERE terminal_id = $1 AND clock_out IS NULL
+       RETURNING cashier_id`,
+      [terminalId]
+    );
+    for (const shift of ended) await revokeAllForCashier(shift.cashier_id);
+  }
 
   res.json(rows[0]);
 });
