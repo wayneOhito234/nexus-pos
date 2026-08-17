@@ -1,4 +1,13 @@
 ```bash
+Select-String -Path C:\nexus-pos\apps\terminal\src\styles.css -Pattern "app > \*|#root > \*"
+```
+```bash
+Get-Printer | Select-Object Name, DriverName, PortName
+```
+
+
+
+```bash
 psql -U postgres -d nexus_pos -c "ALTER TABLE shifts ADD COLUMN IF NOT EXISTS opening_float NUMERIC(12,2) NOT NULL DEFAULT 0, ADD COLUMN IF NOT EXISTS counted_cash NUMERIC(12,2), ADD COLUMN IF NOT EXISTS expected_cash NUMERIC(12,2), ADD COLUMN IF NOT EXISTS counted_at TIMESTAMPTZ, ADD COLUMN IF NOT EXISTS count_notes TEXT;"
 ```
 
