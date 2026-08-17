@@ -60,7 +60,7 @@ function vfdClose() {
 // ── Display states ────────────────────────────────────────────────────────────
 
 function vfdWelcome() {
-  write('   ZummMart        ', '     Welcome!       ');
+  write('   Zummart        ', '     Welcome!       ');
 }
 
 function vfdClear() {
