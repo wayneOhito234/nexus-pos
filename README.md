@@ -1,6 +1,12 @@
 psql -U postgres -d nexus_pos
 
 ```bash
+psql -U postgres -d nexus_pos -c "ALTER TABLE cashiers ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT true;"
+
+psql -U postgres -d nexus_pos -c "CREATE TABLE IF NOT EXISTS terminals (id SERIAL PRIMARY KEY, terminal_id TEXT NOT NULL UNIQUE, label TEXT, active BOOLEAN NOT NULL DEFAULT true, disabled_reason TEXT, disabled_by INTEGER REFERENCES cashiers(id), disabled_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT now());"
+```
+
+```bash
 DO $$
 DECLARE
   r RECORD;
