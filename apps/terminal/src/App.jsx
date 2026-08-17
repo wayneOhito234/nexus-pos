@@ -116,7 +116,7 @@ export default function App() {
       setProducts((prev) => {
         const byId = new Map(prev.map((p) => [p.id, p]));
         for (const updated of updatedProducts) byId.set(updated.id, updated);
-        const merged = Array.from(byId.values());
+        const merged = Array.from(byId.values()).filter((p) => p.active !== false);
         window.nexusCache?.setProducts(merged);
         return merged;
       });
