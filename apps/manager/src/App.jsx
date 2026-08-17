@@ -8,6 +8,8 @@ import { StaffView } from './components/StaffView.jsx';
 import { DrawerPinsView } from './components/DrawerPinsView.jsx';
 import { TerminalsView } from './components/TerminalsView.jsx';
 import { ReportsView } from './components/ReportsView.jsx';
+import { CashUpView } from './components/CashUpView.jsx';
+import { InsightsView } from './components/InsightsView.jsx';
 import { loadServerOrigin, setAuthToken, clearAuthToken, signOut } from './api/client.js';
 
 export default function App() {
@@ -67,6 +69,8 @@ export default function App() {
         {section === 'drawer' && <DrawerPinsView onNotify={notify} />}
         {section === 'terminals' && isAdmin && <TerminalsView onNotify={notify} />}
         {section === 'reports' && <ReportsView onNotify={notify} />}
+        {section === 'cashup' && <CashUpView onNotify={notify} />}
+        {section === 'insights' && isAdmin && <InsightsView onNotify={notify} />}
       </main>
 
       {toast && <div className={`toast toast--${toast.kind}`}>{toast.message}</div>}

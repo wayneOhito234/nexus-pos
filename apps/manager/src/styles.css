@@ -819,3 +819,43 @@ button.ghost:hover { color: var(--text); border-color: var(--accent); }
 .terminal-row__head strong { font-size: 0.95rem; }
 .terminal-row__busy { font-size: 0.74rem; color: var(--accent); }
 .terminal-row button { display: flex; align-items: center; gap: 6px; white-space: nowrap; padding: 9px 14px; }
+
+/* ---------- Cash up ---------- */
+.cashup-row {
+  display: grid; grid-template-columns: minmax(0,1.4fr) auto 130px;
+  gap: 18px; align-items: center;
+  padding: 14px 0; border-bottom: 1px solid var(--line);
+}
+.cashup-row:last-child { border-bottom: none; }
+.cashup-row__who { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.cashup-row__who strong { font-size: 0.9rem; }
+.cashup-row__who span { font-size: 0.75rem; color: var(--text-dim); }
+.cashup-row__who em { font-style: italic; font-size: 0.75rem; color: var(--warn); }
+.cashup-row__figures { display: flex; gap: 20px; }
+.cashup-row__figures div { display: flex; flex-direction: column; }
+.cashup-row__figures span { font-size: 0.68rem; text-transform: uppercase; color: var(--text-dim); }
+.cashup-row__figures strong { font-size: 0.86rem; font-variant-numeric: tabular-nums; }
+.cashup-row__variance {
+  display: flex; align-items: center; justify-content: flex-end; gap: 6px;
+  font-size: 0.86rem; font-weight: 700;
+}
+.cashup-row__variance.is-ok { color: var(--good); }
+.cashup-row__variance.is-short { color: var(--bad); }
+.cashup-row__variance.is-over { color: var(--warn); }
+
+/* ---------- Hourly bars ---------- */
+.hourbars { display: flex; flex-direction: column; gap: 5px; }
+.hourbar {
+  display: grid; grid-template-columns: 54px minmax(0,1fr) 100px 74px;
+  gap: 10px; align-items: center; font-size: 0.8rem;
+}
+.hourbar__label { color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.hourbar__track { height: 18px; background: var(--surface-2); border-radius: 4px; overflow: hidden; }
+.hourbar__fill {
+  height: 100%; border-radius: 4px;
+  background: linear-gradient(90deg, var(--accent-2), var(--accent));
+}
+.hourbar__value { text-align: right; font-variant-numeric: tabular-nums; }
+.hourbar__count { text-align: right; color: var(--text-dim); font-size: 0.74rem; }
+
+.kpi .is-bad { color: var(--bad); }

@@ -6,6 +6,8 @@ import {
   KeyRound,
   Monitor,
   BarChart3,
+  Banknote,
+  Lightbulb,
   LogOut,
   ShieldCheck,
 } from 'lucide-react';
@@ -20,6 +22,8 @@ const SECTIONS = [
   { id: 'drawer', label: 'Drawer PINs', icon: KeyRound },
   { id: 'terminals', label: 'Terminals', icon: Monitor, adminOnly: true },
   { id: 'reports', label: 'Reports', icon: BarChart3 },
+  { id: 'cashup', label: 'Cash up', icon: Banknote },
+  { id: 'insights', label: 'Insights', icon: Lightbulb, adminOnly: true },
 ];
 
 export function Sidebar({ active, onSelect, staff, onSignOut }) {
