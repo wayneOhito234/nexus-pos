@@ -5,6 +5,10 @@ import { requireAuth } from '../auth.js';
 
 export const analyticsRouter = Router();
 
+// Everything except /summary is manager territory. /summary stays open
+// because the till's own KPI strip uses it.
+const managerRead = [managerIpGuard, requireAuth];
+
 // GET /api/analytics/summary
 // Today's totals, a 7-day trend, top products, and a payment method
 // breakdown -- everything the analytics panel needs in one call.
@@ -64,10 +68,10 @@ analyticsRouter.get('/summary', async (req, res) => {
 // actually reconciles against at close.
 //
 // `since` is interpolated rather than parameterised because Postgres won't
-// accept date_trunc's unit as a bound parameter. Safe here since `period`
-// is validated against a fixed list first, so nothing user-supplied ever
+// accept date_trunc's unit as a bound parameter. Safe here since `period` is
+// validated against a fixed list first, so nothing user-supplied ever
 // reaches the SQL.
-analyticsRouter.get('/breakdown', managerIpGuard, requireAuth, async (req, res) => {
+analyticsRouter.get('/breakdown', ...managerRead, async (req, res) => {
   const period = ['day', 'week', 'month'].includes(req.query.period) ? req.query.period : 'day';
 
   const since = {
@@ -120,7 +124,7 @@ analyticsRouter.get('/breakdown', managerIpGuard, requireAuth, async (req, res) 
 // GET /api/analytics/receipt/:saleId
 // The full line detail behind one sale, so a manager can pull up a
 // customer's receipt without walking to the till.
-analyticsRouter.get('/receipt/:saleId', managerIpGuard, requireAuth, async (req, res) => {
+analyticsRouter.get('/receipt/:saleId', ...managerRead, async (req, res) => {
   const { rows: sale } = await pool.query(
     `SELECT s.*, c.name AS cashier_name
      FROM sales s
@@ -149,9 +153,9 @@ analyticsRouter.get('/receipt/:saleId', managerIpGuard, requireAuth, async (req,
 //
 // Note the deliberate asymmetry: revenue comes from the sales table alone,
 // while cost of goods only counts products that have a cost_price. Margin
-// is therefore understated until every product has a cost recorded, which
-// is honest -- inferring a cost would be worse than showing a gap.
-analyticsRouter.get('/balance-sheet', managerIpGuard, requireAuth, async (req, res) => {
+// is therefore reported against costed revenue, and a coverage figure is
+// returned so the UI can be honest about what the number covers.
+analyticsRouter.get('/balance-sheet', ...managerRead, async (req, res) => {
   const period = ['day', 'week', 'month', 'year'].includes(req.query.period)
     ? req.query.period
     : 'month';
@@ -198,7 +202,6 @@ analyticsRouter.get('/balance-sheet', managerIpGuard, requireAuth, async (req, r
       AND p.cost_price IS NOT NULL
   `);
 
-  // Total revenue across every sale, whether the product has a cost or not.
   const { rows: totalRevenue } = await pool.query(`
     SELECT COALESCE(SUM(total), 0) AS revenue, COUNT(*) AS sale_count
     FROM sales
@@ -237,8 +240,6 @@ analyticsRouter.get('/balance-sheet', managerIpGuard, requireAuth, async (req, r
     ORDER BY gross_profit DESC
   `);
 
-  // How much of the revenue we can actually calculate margin on. If this is
-  // well below 100%, the profit figures are incomplete rather than wrong.
   const { rows: coverage } = await pool.query(`
     SELECT
       COUNT(*) FILTER (WHERE cost_price IS NOT NULL) AS costed,
@@ -261,8 +262,6 @@ analyticsRouter.get('/balance-sheet', managerIpGuard, requireAuth, async (req, r
       costed_revenue: Number(cur.costed_revenue),
       cogs:           Number(cur.cogs),
       gross_profit:   Number(cur.gross_profit),
-      // Margin against costed revenue, not total -- dividing profit by
-      // revenue that includes uncosted items would understate it.
       margin_pct: Number(cur.costed_revenue) > 0
         ? (Number(cur.gross_profit) / Number(cur.costed_revenue)) * 100
         : 0,
@@ -300,7 +299,7 @@ analyticsRouter.get('/balance-sheet', managerIpGuard, requireAuth, async (req, r
 
 // GET /api/analytics/top-products?days=30&limit=10
 // Best and worst performers by gross profit, in one call.
-analyticsRouter.get('/top-products', managerIpGuard, requireAuth, async (req, res) => {
+analyticsRouter.get('/top-products', ...managerRead, async (req, res) => {
   const days  = Math.min(Math.max(parseInt(req.query.days  || '30', 10), 1), 365);
   const limit = Math.min(Math.max(parseInt(req.query.limit || '10', 10), 1), 50);
 
@@ -345,14 +344,210 @@ analyticsRouter.get('/top-products', managerIpGuard, requireAuth, async (req, re
   });
 });
 
+// GET /api/analytics/hourly?days=7
+// Takings by hour of day. Tells an owner when to staff up and when the shop
+// is dead.
+analyticsRouter.get('/hourly', ...managerRead, async (req, res) => {
+  const days = Math.min(Math.max(parseInt(req.query.days || '7', 10), 1), 90);
+
+  const { rows } = await pool.query(
+    `SELECT
+       EXTRACT(HOUR FROM created_at)::int AS hour,
+       COUNT(*)                           AS sale_count,
+       COALESCE(SUM(total), 0)            AS revenue
+     FROM sales
+     WHERE created_at >= now() - ($1 || ' days')::interval
+     GROUP BY hour
+     ORDER BY hour`,
+    [String(days)]
+  );
+
+  // Fill the gaps, since a dead hour is itself the useful signal.
+  const byHour = new Map(rows.map((r) => [r.hour, r]));
+  const hours = Array.from({ length: 24 }, (_, h) => {
+    const found = byHour.get(h);
+    return {
+      hour: h,
+      sale_count: found ? Number(found.sale_count) : 0,
+      revenue: found ? Number(found.revenue) : 0,
+      average_per_day: found ? Number(found.revenue) / days : 0,
+    };
+  });
+
+  const busiest = [...hours].sort((a, b) => b.revenue - a.revenue)[0];
+
+  res.json({ days, hours, busiest_hour: busiest?.revenue > 0 ? busiest.hour : null });
+});
+
+// GET /api/analytics/slow-movers?days=60
+// Stock sitting still. Capital on a shelf rather than in the till.
+analyticsRouter.get('/slow-movers', ...managerRead, async (req, res) => {
+  const days = Math.min(Math.max(parseInt(req.query.days || '60', 10), 7), 365);
+
+  const { rows } = await pool.query(
+    `SELECT
+       p.id, p.name, p.sku, p.category, p.price, p.cost_price,
+       p.stock_qty, p.store_qty,
+       (p.stock_qty + p.store_qty) AS total_units,
+       COALESCE(p.cost_price * (p.stock_qty + p.store_qty), 0) AS tied_up_value,
+       MAX(s.created_at) AS last_sold
+     FROM products p
+     LEFT JOIN sale_items si ON si.product_id = p.id
+     LEFT JOIN sales s ON s.id = si.sale_id
+     WHERE p.active = true
+       AND (p.stock_qty + p.store_qty) > 0
+     GROUP BY p.id
+     HAVING MAX(s.created_at) IS NULL
+        OR MAX(s.created_at) < now() - ($1 || ' days')::interval
+     ORDER BY tied_up_value DESC NULLS LAST
+     LIMIT 40`,
+    [String(days)]
+  );
+
+  res.json({
+    days,
+    products: rows.map((r) => ({
+      ...r,
+      total_units: Number(r.total_units),
+      tied_up_value: Number(r.tied_up_value),
+      never_sold: r.last_sold === null,
+    })),
+    total_tied_up: rows.reduce((sum, r) => sum + Number(r.tied_up_value), 0),
+  });
+});
+
+// GET /api/analytics/stock-value
+// What the inventory is worth at cost, and what it would fetch at retail.
+analyticsRouter.get('/stock-value', ...managerRead, async (req, res) => {
+  const { rows: totals } = await pool.query(`
+    SELECT
+      COUNT(*)                                               AS active_products,
+      COALESCE(SUM(stock_qty + store_qty), 0)                AS total_units,
+      COALESCE(SUM(cost_price * (stock_qty + store_qty)), 0) AS cost_value,
+      COALESCE(SUM(price * (stock_qty + store_qty)), 0)      AS retail_value,
+      COUNT(*) FILTER (WHERE cost_price IS NULL)             AS missing_cost
+    FROM products
+    WHERE active = true
+  `);
+
+  const { rows: byLocation } = await pool.query(`
+    SELECT
+      COALESCE(SUM(cost_price * stock_qty), 0) AS shelf_value,
+      COALESCE(SUM(cost_price * store_qty), 0) AS store_value
+    FROM products WHERE active = true
+  `);
+
+  const { rows: byCategory } = await pool.query(`
+    SELECT category,
+           COALESCE(SUM(stock_qty + store_qty), 0)                AS units,
+           COALESCE(SUM(cost_price * (stock_qty + store_qty)), 0) AS cost_value
+    FROM products
+    WHERE active = true
+    GROUP BY category
+    ORDER BY cost_value DESC
+  `);
+
+  const t = totals[0];
+
+  res.json({
+    active_products: Number(t.active_products),
+    total_units: Number(t.total_units),
+    cost_value: Number(t.cost_value),
+    retail_value: Number(t.retail_value),
+    potential_profit: Number(t.retail_value) - Number(t.cost_value),
+    // Cost value excludes anything without a cost price, so a high count
+    // here means the figure is an undercount rather than wrong.
+    products_missing_cost: Number(t.missing_cost),
+    shelf_value: Number(byLocation[0].shelf_value),
+    store_value: Number(byLocation[0].store_value),
+    byCategory: byCategory.map((r) => ({
+      category: r.category,
+      units: Number(r.units),
+      cost_value: Number(r.cost_value),
+    })),
+  });
+});
+
+// GET /api/analytics/shrinkage?days=30
+// Stock written off, valued at cost. Damage and expiry are a cost of doing
+// business; unexplained losses are the ones worth chasing.
+analyticsRouter.get('/shrinkage', ...managerRead, async (req, res) => {
+  const days = Math.min(Math.max(parseInt(req.query.days || '30', 10), 1), 365);
+
+  const { rows: byReason } = await pool.query(
+    `SELECT
+       m.reason,
+       COUNT(*)                                            AS event_count,
+       SUM(ABS(m.qty_change))                              AS units_lost,
+       COALESCE(SUM(ABS(m.qty_change) * p.cost_price), 0)  AS value_lost
+     FROM stock_movements m
+     JOIN products p ON p.id = m.product_id
+     WHERE m.movement_type = 'adjustment'
+       AND m.qty_change < 0
+       AND m.created_at >= now() - ($1 || ' days')::interval
+     GROUP BY m.reason
+     ORDER BY value_lost DESC`,
+    [String(days)]
+  );
+
+  const { rows: byProduct } = await pool.query(
+    `SELECT
+       p.id, p.name, p.sku,
+       SUM(ABS(m.qty_change))                              AS units_lost,
+       COALESCE(SUM(ABS(m.qty_change) * p.cost_price), 0)  AS value_lost
+     FROM stock_movements m
+     JOIN products p ON p.id = m.product_id
+     WHERE m.movement_type = 'adjustment'
+       AND m.qty_change < 0
+       AND m.created_at >= now() - ($1 || ' days')::interval
+     GROUP BY p.id, p.name, p.sku
+     ORDER BY value_lost DESC
+     LIMIT 20`,
+    [String(days)]
+  );
+
+  const { rows: recent } = await pool.query(
+    `SELECT m.id, m.reason, m.qty_change, m.location, m.created_at,
+            p.name AS product_name, c.name AS staff_name,
+            COALESCE(ABS(m.qty_change) * p.cost_price, 0) AS value_lost
+     FROM stock_movements m
+     JOIN products p ON p.id = m.product_id
+     LEFT JOIN cashiers c ON c.id = m.staff_id
+     WHERE m.movement_type = 'adjustment'
+       AND m.qty_change < 0
+       AND m.created_at >= now() - ($1 || ' days')::interval
+     ORDER BY m.created_at DESC
+     LIMIT 50`,
+    [String(days)]
+  );
+
+  res.json({
+    days,
+    total_value_lost: byReason.reduce((sum, r) => sum + Number(r.value_lost), 0),
+    total_units_lost: byReason.reduce((sum, r) => sum + Number(r.units_lost), 0),
+    byReason: byReason.map((r) => ({
+      reason: r.reason,
+      event_count: Number(r.event_count),
+      units_lost: Number(r.units_lost),
+      value_lost: Number(r.value_lost),
+    })),
+    byProduct: byProduct.map((r) => ({
+      ...r,
+      units_lost: Number(r.units_lost),
+      value_lost: Number(r.value_lost),
+    })),
+    recent,
+  });
+});
+
 // GET /api/analytics/dashboard
 // The owner's one screen: how the day went, and anything worth looking at.
 // Assembled from several small queries rather than one large join, since
 // each answers a different question.
-analyticsRouter.get('/dashboard', managerIpGuard, requireAuth, async (req, res) => {
+analyticsRouter.get('/dashboard', ...managerRead, async (req, res) => {
   const q = (sql) => pool.query(sql);
 
-  const [today, week, month, byTerminal, byMethod, lowStock, owed, negative, drawer, noPin] =
+  const [today, week, month, byTerminal, byMethod, lowStock, owed, negative, drawer, noPin, variance] =
     await Promise.all([
       q(`
         SELECT COALESCE(SUM(total),0) AS revenue, COUNT(*) AS sale_count,
@@ -406,6 +601,12 @@ analyticsRouter.get('/dashboard', managerIpGuard, requireAuth, async (req, res) 
             AND d.valid_for = CURRENT_DATE AND d.cleared_at IS NULL
         )
       `),
+      q(`
+        SELECT COALESCE(SUM(counted_cash - expected_cash), 0) AS net,
+               COUNT(*) FILTER (WHERE ABS(counted_cash - expected_cash) > 0.01) AS off_count
+        FROM shifts
+        WHERE counted_at >= date_trunc('week', now())
+      `),
     ]);
 
   const cash = Number(byMethod.rows.find((r) => r.payment_method === 'cash')?.revenue || 0);
@@ -418,6 +619,10 @@ analyticsRouter.get('/dashboard', managerIpGuard, requireAuth, async (req, res) 
     byTerminal: byTerminal.rows,
     lowStock: lowStock.rows,
     supplierBalance: Number(owed.rows[0].balance),
+    cashVariance: {
+      net_this_week: Number(variance.rows[0].net),
+      shifts_off: Number(variance.rows[0].off_count),
+    },
     exceptions: {
       negativeStock: negative.rows,
       drawerOpensToday: Number(drawer.rows[0].count),

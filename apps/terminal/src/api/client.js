@@ -96,3 +96,37 @@ export async function checkPaymentStatus(checkoutRequestId) {
   if (!res.ok) throw new Error(body.error || 'Status check failed');
   return body;
 }
+
+// ---------- Generic JSON helpers ----------
+// The manager/analytics calls below all follow the same shape, so they share
+// one wrapper. It reuses fetchWithTimeout (timeout + auth header) and unwraps
+// the server's error message the same way postSale/initiateStkPush do above.
+async function request(path, options = {}) {
+  const res = await fetchWithTimeout(`${SERVER_ORIGIN}${path}`, options);
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || `Server responded ${res.status}`);
+  return body;
+}
+
+const get = (path) => request(path);
+
+const patch = (path, data) =>
+  request(path, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data),
+  });
+
+// ---------- Cash reconciliation ----------
+export const fetchReconciliation = (days = 7) =>
+  get(`/api/manager/shifts/reconciliation?days=${days}`);
+
+// ---------- Operational insights ----------
+export const fetchHourly = (days = 7) => get(`/api/analytics/hourly?days=${days}`);
+export const fetchSlowMovers = (days = 60) => get(`/api/analytics/slow-movers?days=${days}`);
+export const fetchStockValue = () => get('/api/analytics/stock-value');
+export const fetchShrinkage = (days = 30) => get(`/api/analytics/shrinkage?days=${days}`);
+
+// ---------- Terminals ----------
+export const setTerminalActive = (terminalId, active, reason, default_float) =>
+  patch(`/api/manager/terminals/${terminalId}`, { active, reason, default_float });

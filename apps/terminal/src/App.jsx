@@ -9,6 +9,7 @@ import { Cart } from './components/Cart.jsx';
 import { Receipt } from './components/Receipt.jsx';
 import { DrawerPinGate } from './components/DrawerPinGate.jsx';
 import { ChangeConfirm } from './components/ChangeConfirm.jsx';
+import { ShiftClose } from './components/ShiftClose.jsx';
 import { Login } from './components/Login.jsx';
 import { TerminalSetup } from './components/TerminalSetup.jsx';
 import { ToastContainer } from './components/ToastContainer.jsx';
@@ -23,7 +24,6 @@ import {
   clearAuthToken,
   SERVER_ORIGIN,
 } from './api/client.js';
-import { clockOut } from './api/managerClient.js';
 import { connectSocket, getSocket } from './socket.js';
 import { loadTerminalId, getTerminalId } from './terminalId.js';
 
@@ -49,6 +49,7 @@ export default function App() {
   const [showChangeDrawerPin, setShowChangeDrawerPin] = useState(false);
   const [showChangeConfirm, setShowChangeConfirm] = useState(false);
   const [pendingCashAmount, setPendingCashAmount] = useState(null);
+  const [showShiftClose, setShowShiftClose] = useState(false);
 
   const { toasts, addToast, removeToast } = useToasts();
 
@@ -112,6 +113,10 @@ export default function App() {
 
     const handleConnect = () => setOnline(true);
     const handleDisconnect = () => setOnline(false);
+
+    // An archived product arrives here like any other update, so filter it
+    // out -- otherwise a product the manager just pulled stays sellable
+    // until the till is restarted.
     const handleStockUpdated = (updatedProducts) => {
       setProducts((prev) => {
         const byId = new Map(prev.map((p) => [p.id, p]));
@@ -217,24 +222,28 @@ export default function App() {
     };
   }
 
+  // cashier_id is no longer sent. The server reads it from the verified
+  // session, so anything the client claimed here would be ignored.
   async function handleCheckoutCash(amountReceived) {
     setCheckingOut(true);
     setPaymentStatus(null);
     try {
       const payload = {
         terminal_id: getTerminalId(),
-        cashier_id: cashier.id,
         payment_method: PAYMENT_METHODS.CASH,
         amount_received: amountReceived,
         items: cart.map((item) => ({ product_id: item.product.id, qty: item.qty })),
       };
+
       const sale = await postSale(payload);
+
       setReceipt(
         buildReceipt(sale, 'Cash', {
           amountReceived: sale.amount_received,
           changeGiven: sale.change_given,
         })
       );
+
       setCart([]);
       addToast(`Sale #${sale.id} complete, KES ${Number(sale.total).toFixed(2)}`, 'success');
     } catch (err) {
@@ -254,12 +263,16 @@ export default function App() {
         terminal_id: getTerminalId(),
       });
 
-      setPaymentStatus(`Waiting for the customer to approve on their phone... (ID: ${checkoutRequestId})`);
+      setPaymentStatus(
+        `Waiting for the customer to approve on their phone... (ID: ${checkoutRequestId})`
+      );
 
       const finalStatus = await pollPaymentStatus(checkoutRequestId);
 
       if (finalStatus.status !== 'confirmed') {
-        setPaymentStatus(`Payment ${finalStatus.status}: ${finalStatus.resultDesc || 'not completed'}`);
+        setPaymentStatus(
+          `Payment ${finalStatus.status}: ${finalStatus.resultDesc || 'not completed'}`
+        );
         addToast(`Payment ${finalStatus.status}`, 'error');
         setCheckingOut(false);
         return;
@@ -267,12 +280,13 @@ export default function App() {
 
       const payload = {
         terminal_id: getTerminalId(),
-        cashier_id: cashier.id,
         payment_method: PAYMENT_METHODS.MPESA,
         mpesa_ref: finalStatus.mpesaRef,
         items: cart.map((item) => ({ product_id: item.product.id, qty: item.qty })),
       };
+
       const sale = await postSale(payload);
+
       setReceipt(buildReceipt(sale, 'M-Pesa', { mpesaRef: finalStatus.mpesaRef }));
       setCart([]);
       setPaymentStatus(null);
@@ -326,29 +340,43 @@ export default function App() {
 
   // The token comes back from login alongside the cashier's identity, but it
   // only does anything once it's handed to client.js -- that's the module
-  // that actually attaches it to outgoing requests. Store it in state
-  // without doing this and every authenticated call (drawer verify,
-  // clock-out, etc.) silently goes out with no Authorization header at all.
+  // that attaches it to outgoing requests. Skip this and every
+  // authenticated call goes out with no Authorization header at all.
   function handleLoggedIn(newCashier) {
     setAuthToken(newCashier.token);
     setCashier(newCashier);
     window.nexusSession?.setCashierId(newCashier.id);
   }
 
-  async function handleLogout() {
-    if (!cashier) return;
-    try {
-      await clockOut(cashier.id);
-    } catch (err) {
-      console.warn('clock-out failed:', err.message);
+  // Logging out now goes through the cash count, so a shift can't end
+  // without the drawer being reconciled.
+  function handleLogout() {
+    if (cart.length > 0) {
+      addToast('Finish or clear the current sale first.', 'error');
+      return;
     }
+    setShowShiftClose(true);
+  }
+
+  function handleShiftClosed(result) {
+    setShowShiftClose(false);
     clearAuthToken();
     window.nexusSession?.clearCashierId();
     setCashier(null);
+
+    const variance = Number(result.variance);
+    if (Math.abs(variance) > 0.01) {
+      console.warn(`Shift closed with a variance of ${variance.toFixed(2)}`);
+    }
   }
 
   if (bootState === 'checking') {
-    return <div className="app" style={{ alignItems: 'center', justifyContent: 'center', display: 'flex' }} />;
+    return (
+      <div
+        className="app"
+        style={{ alignItems: 'center', justifyContent: 'center', display: 'flex' }}
+      />
+    );
   }
 
   if (bootState === 'needs-setup') {
@@ -403,7 +431,6 @@ export default function App() {
       {showDrawerPin && (
         <DrawerPinGate
           reason="No sale"
-          cashierId={cashier.id}
           onUnlock={handleDrawerOpened}
           onCancel={() => setShowDrawerPin(false)}
         />
@@ -413,7 +440,6 @@ export default function App() {
         <DrawerPinGate
           title="Enter PIN to open drawer"
           reason="Change given"
-          cashierId={cashier.id}
           onUnlock={handleChangeDrawerUnlocked}
           onCancel={handleChangeCancelled}
         />
@@ -425,6 +451,14 @@ export default function App() {
           total={total}
           onAcknowledge={handleChangeAcknowledged}
           onCancel={handleChangeCancelled}
+        />
+      )}
+
+      {showShiftClose && (
+        <ShiftClose
+          cashierName={cashier.name}
+          onClosed={handleShiftClosed}
+          onCancel={() => setShowShiftClose(false)}
         />
       )}
     </div>
