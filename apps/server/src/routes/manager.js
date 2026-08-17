@@ -20,6 +20,17 @@ export const managerRouter = Router();
 // the token proves who, the role proves what they may do.
 const managerOnly = [managerIpGuard, requireAuth, requireRole('manager', 'admin')];
 
+// Counts active admins other than the one given. Used to stop the system
+// being left with nobody who can administer it -- recoverable only through
+// SQL, which is a bad place to end up at opening time.
+async function otherActiveAdmins(excludeId) {
+  const { rows } = await pool.query(
+    "SELECT COUNT(*)::int AS count FROM cashiers WHERE role = 'admin' AND active = true AND id <> $1",
+    [excludeId]
+  );
+  return rows[0].count;
+}
+
 // ============================================================
 // Sign-in
 //
@@ -220,8 +231,7 @@ managerRouter.post('/cashiers/register', ...managerOnly, async (req, res) => {
 // body: { active }
 //
 // Deactivation is the usual way to remove someone -- shift history and sales
-// attribution survive, which deletion sacrifices. Admin accounts cannot be
-// deactivated here, for the same reason admin cannot be granted here.
+// attribution survive, which deletion sacrifices.
 managerRouter.patch('/cashiers/:id/active', ...managerOnly, async (req, res) => {
   const { id } = req.params;
   const { active } = req.body;
@@ -235,8 +245,16 @@ managerRouter.patch('/cashiers/:id/active', ...managerOnly, async (req, res) => 
 
   const { rows: target } = await pool.query('SELECT role FROM cashiers WHERE id = $1', [id]);
   if (target.length === 0) return res.status(404).json({ error: 'Account not found' });
-  if (target[0].role === 'admin') {
-    return res.status(403).json({ error: 'Admin accounts cannot be deactivated from here.' });
+
+  // Deactivating the last admin would leave nobody able to administer the
+  // system, recoverable only through the database.
+  if (target[0].role === 'admin' && !active) {
+    const remaining = await otherActiveAdmins(Number(id));
+    if (remaining === 0) {
+      return res.status(409).json({
+        error: 'This is the only active admin. Create another admin before deactivating this one.',
+      });
+    }
   }
 
   const { rows } = await pool.query(
@@ -259,18 +277,30 @@ managerRouter.patch('/cashiers/:id/active', ...managerOnly, async (req, res) => 
 
 // DELETE /api/manager/cashiers/:id
 //
-// A real, permanent delete. Sessions and shifts are cleared explicitly first
-// since those rows shouldn't outlive the account. Everything else that
-// references this cashier is set to ON DELETE SET NULL at the database
-// level, so old records keep existing for reporting but lose the name.
+// Permanent. Sessions and shifts are cleared first since those rows
+// shouldn't outlive the account. Everything else referencing this cashier
+// is ON DELETE SET NULL, so old records survive for reporting but lose the
+// name.
 //
 // Deactivating is almost always the better choice -- this exists for
-// genuine mistakes, like an account created in error.
+// genuine mistakes, like an account created with a typo that never traded.
+// Admin accounts are refused outright: an owner's account should not be
+// removable by whoever happens to be logged in, and the blast radius of
+// getting it wrong is the whole system.
 managerRouter.delete('/cashiers/:id', ...managerOnly, async (req, res) => {
   const { id } = req.params;
 
   if (Number(id) === req.session.cashierId) {
     return res.status(409).json({ error: 'You cannot delete your own account.' });
+  }
+
+  const { rows: target } = await pool.query('SELECT role, name FROM cashiers WHERE id = $1', [id]);
+  if (target.length === 0) return res.status(404).json({ error: 'Account not found' });
+
+  if (target[0].role === 'admin') {
+    return res.status(403).json({
+      error: 'Admin accounts cannot be deleted here. Deactivate instead, or change it directly in the database once another admin exists.',
+    });
   }
 
   const { rows: openShift } = await pool.query(
@@ -294,7 +324,7 @@ managerRouter.delete('/cashiers/:id', ...managerOnly, async (req, res) => {
   } catch (err) {
     if (err.code === '23503') {
       return res.status(409).json({
-        error: `This account still has related records blocking deletion (${err.constraint || 'unknown constraint'}). Deactivate them instead, or run the cashier foreign-key migration.`,
+        error: `${target[0].name} has trading history that blocks deletion. Deactivate them instead -- their records stay intact and they lose all access.`,
       });
     }
     throw err;
@@ -310,11 +340,25 @@ managerRouter.patch('/cashiers/:id/role', ...managerOnly, async (req, res) => {
   if (!['cashier', 'manager'].includes(role)) {
     return res.status(400).json({ error: "Role must be 'cashier' or 'manager'" });
   }
+  if (Number(id) === req.session.cashierId) {
+    return res.status(409).json({ error: 'You cannot change your own role.' });
+  }
 
   const { rows: target } = await pool.query('SELECT role FROM cashiers WHERE id = $1', [id]);
   if (target.length === 0) return res.status(404).json({ error: 'Account not found' });
+
+  // Demoting the last admin would strip administrative access from the
+  // whole system, fixable only in SQL.
   if (target[0].role === 'admin') {
-    return res.status(403).json({ error: 'An admin account cannot be demoted from here.' });
+    const remaining = await otherActiveAdmins(Number(id));
+    if (remaining === 0) {
+      return res.status(409).json({
+        error: 'This is the only active admin. Create another admin before changing this role.',
+      });
+    }
+    return res.status(403).json({
+      error: 'An admin account cannot be demoted here. Change it directly in the database.',
+    });
   }
 
   const { rows } = await pool.query(

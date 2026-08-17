@@ -1,3 +1,52 @@
+```bash
+psql -U postgres -d nexus_pos -c "ALTER TABLE shifts ADD COLUMN IF NOT EXISTS opening_float NUMERIC(12,2) NOT NULL DEFAULT 0, ADD COLUMN IF NOT EXISTS counted_cash NUMERIC(12,2), ADD COLUMN IF NOT EXISTS expected_cash NUMERIC(12,2), ADD COLUMN IF NOT EXISTS counted_at TIMESTAMPTZ, ADD COLUMN IF NOT EXISTS count_notes TEXT;"
+
+psql -U postgres -d nexus_pos -c "ALTER TABLE terminals ADD COLUMN IF NOT EXISTS default_float NUMERIC(12,2) NOT NULL DEFAULT 0;"
+
+psql -U postgres -d nexus_pos -c "CREATE INDEX IF NOT EXISTS idx_shifts_counted ON shifts(counted_at DESC);"
+```
+
+### 1.0 Creating a new admin
+#### 1.1  On The Manager PC or Server Machine
+```bash
+Invoke-RestMethod -Uri "http://localhost:4000/api/manager/cashiers/register" -Method Post -ContentType "application/json" -Body (@{
+  first_name = "Wayne"
+  last_name  = "Ohito"
+  password   = "<a real password>"
+  role       = "manager"
+} | ConvertTo-Json)
+```
+#### 1.2 Very First Time Admin Account Creation
+```bash
+psql -U postgres -d nexus_pos
+```
+In psql
+```bash
+INSERT INTO cashiers (name, first_name, last_name, password_hash, role, active)
+VALUES ('Wayne Ohito', 'Wayne', 'Ohito',
+        crypt('yourpassword', gen_salt('bf', 10)), 'admin', true);
+```
+That needs the pgcrypto extension:
+```bash
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+```
+A caveat: pgcrypto's bcrypt and bcryptjs produce compatible hashes, so this works — but if it doesn't, hash it in Node instead:
+```bash
+cd C:\nexus-pos\apps\server
+node -e "import('bcryptjs').then(b => console.log(b.default.hashSync('yourpassword', 10)))"
+```
+PROMOTE TO ADMIN
+
+```bash
+psql -U postgres -d nexus_pos -c "UPDATE cashiers SET role = 'admin' WHERE first_name = 'Wayne' AND last_name = 'Ohito';"
+```
+CONFIRM
+```bash
+psql -U postgres -d nexus_pos -c "SELECT id, name, role, active FROM cashiers;"
+```
+
+
+
 psql -U postgres -d nexus_pos
 
 ```bash
