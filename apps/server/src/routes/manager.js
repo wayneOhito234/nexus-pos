@@ -15,6 +15,8 @@ import { checkLowStockAndAlert } from '../whatsapp.js';
 
 export const managerRouter = Router();
 
+const round2 = (n) => Math.round(n * 100) / 100;
+
 // Manager and admin functions need the right machine, a valid session, and
 // the right role. Each catches something the others miss: IP proves where,
 // the token proves who, the role proves what they may do.
@@ -195,43 +197,6 @@ managerRouter.get('/staff', ...managerOnly, async (req, res) => {
   res.json(rows);
 });
 
-// POST /api/manager/cashiers/register
-// body: { first_name, last_name, password, role? }
-managerRouter.post('/cashiers/register', ...managerOnly, async (req, res) => {
-  const { first_name, last_name, password, role } = req.body;
-
-  if (!first_name || !last_name || !password) {
-    return res.status(400).json({ error: 'first_name, last_name and password are required' });
-  }
-  if (password.length < 4) {
-    return res.status(400).json({ error: 'Password must be at least 4 characters' });
-  }
-
-  const fullName = `${first_name} ${last_name}`.trim();
-
-  const { rows: existing } = await pool.query(
-    'SELECT id FROM cashiers WHERE first_name = $1 AND last_name = $2',
-    [first_name, last_name]
-  );
-  if (existing.length > 0) {
-    return res.status(409).json({ error: 'Someone with that name already exists' });
-  }
-
-  const passwordHash = await bcrypt.hash(password, 10);
-
-  const { rows } = await pool.query(
-    `INSERT INTO cashiers (name, first_name, last_name, password_hash, role)
-     VALUES ($1, $2, $3, $4, $5)
-     RETURNING id, name, first_name, last_name, role, active`,
-    [fullName, first_name, last_name, passwordHash, role || 'cashier']
-  );
-
-  res.status(201).json(rows[0]);
-});
-
-// PATCH /api/manager/cashiers/:id/active
-// body: { active }
-//
 // Deactivation is the usual way to remove someone -- shift history and sales
 // attribution survive, which deletion sacrifices.
 managerRouter.patch('/cashiers/:id/active', ...managerOnly, async (req, res) => {
@@ -400,6 +365,7 @@ managerRouter.get('/terminals', ...managerOnly, async (req, res) => {
   );
 });
 
+
 // PATCH /api/manager/terminals/:terminalId
 // body: { active, reason?, label?, default_float? }
 managerRouter.patch('/terminals/:terminalId', ...managerOnly, async (req, res) => {
@@ -546,6 +512,11 @@ managerRouter.get('/shifts/history', ...managerOnly, async (req, res) => {
 // against the shift. Expected cash is computed by the server from that
 // shift's own sales, never supplied by the client -- otherwise the figure
 // being checked against could be adjusted to match the count.
+//
+// Sales can be split across tenders (part cash, part M-Pesa) and cash sales
+// can hand back change, so expected cash is built from the per-sale
+// cash_amount and change_given columns rather than bucketing a whole sale
+// by a single payment_method.
 // ============================================================
 
 // GET /api/manager/shifts/current-summary
@@ -567,10 +538,11 @@ managerRouter.get('/shifts/current-summary', tillIpGuard, requireAuth, async (re
 
   const { rows: takings } = await pool.query(
     `SELECT
-       COALESCE(SUM(total) FILTER (WHERE payment_method = 'cash'), 0)  AS cash_sales,
-       COALESCE(SUM(total) FILTER (WHERE payment_method <> 'cash'), 0) AS mpesa_sales,
-       COUNT(*)                                                        AS sale_count,
-       COUNT(*) FILTER (WHERE payment_method = 'cash')                 AS cash_count
+       COALESCE(SUM(cash_amount), 0)   AS cash_in,
+       COALESCE(SUM(mpesa_amount), 0)  AS mpesa_in,
+       COALESCE(SUM(change_given), 0)  AS change_out,
+       COUNT(*)                        AS sale_count,
+       COUNT(*) FILTER (WHERE cash_amount > 0) AS cash_count
      FROM sales
      WHERE cashier_id = $1 AND created_at >= $2`,
     [req.session.cashierId, s.clock_in]
@@ -583,19 +555,22 @@ managerRouter.get('/shifts/current-summary', tillIpGuard, requireAuth, async (re
   );
 
   const openingFloat = Number(s.opening_float);
-  const cashSales = Number(takings[0].cash_sales);
+  const cashIn = Number(takings[0].cash_in);
+  const changeOut = Number(takings[0].change_out);
 
   res.json({
     shift_id: s.id,
     terminal_id: s.terminal_id,
     clock_in: s.clock_in,
     opening_float: openingFloat,
-    cash_sales: cashSales,
-    mpesa_sales: Number(takings[0].mpesa_sales),
+    cash_sales: cashIn,
+    mpesa_sales: Number(takings[0].mpesa_in),
+    change_given: changeOut,
     sale_count: Number(takings[0].sale_count),
     cash_sale_count: Number(takings[0].cash_count),
     drawer_opens: drawerOpens[0].count,
-    expected_cash: openingFloat + cashSales,
+    // Cash in, less any change handed back, on top of the opening float.
+    expected_cash: round2(openingFloat + cashIn - changeOut),
   });
 });
 
@@ -624,13 +599,16 @@ managerRouter.post('/shifts/close', tillIpGuard, requireAuth, async (req, res) =
   const s = shift[0];
 
   const { rows: takings } = await pool.query(
-    `SELECT COALESCE(SUM(total), 0) AS cash_sales
+    `SELECT
+       COALESCE(SUM(cash_amount), 0)  AS cash_in,
+       COALESCE(SUM(change_given), 0) AS change_out
      FROM sales
-     WHERE cashier_id = $1 AND created_at >= $2 AND payment_method = 'cash'`,
+     WHERE cashier_id = $1 AND created_at >= $2`,
     [req.session.cashierId, s.clock_in]
   );
 
-  const expected = Number(s.opening_float) + Number(takings[0].cash_sales);
+  const expected =
+    Number(s.opening_float) + Number(takings[0].cash_in) - Number(takings[0].change_out);
 
   const { rows } = await pool.query(
     `UPDATE shifts
@@ -642,7 +620,7 @@ managerRouter.post('/shifts/close', tillIpGuard, requireAuth, async (req, res) =
      WHERE id = $4
      RETURNING id, terminal_id, opening_float, counted_cash, expected_cash,
                (counted_cash - expected_cash) AS variance, clock_in, clock_out`,
-    [Number(counted_cash), expected, notes?.trim() || null, s.id]
+    [Number(counted_cash), round2(expected), notes?.trim() || null, s.id]
   );
 
   await revokeAllForCashier(req.session.cashierId);
@@ -718,7 +696,8 @@ managerRouter.get('/shifts/reconciliation', ...managerOnly, async (req, res) => 
 
 managerRouter.get('/sales/history', ...managerOnly, async (req, res) => {
   const { rows } = await pool.query(`
-    SELECT s.id, s.terminal_id, s.payment_method, s.total, s.mpesa_ref, s.created_at,
+    SELECT s.id, s.terminal_id, s.total, s.cash_amount, s.mpesa_amount,
+           s.change_given, s.mpesa_ref, s.created_at,
            c.name AS cashier_name
     FROM sales s
     LEFT JOIN cashiers c ON c.id = s.cashier_id
@@ -795,7 +774,6 @@ managerRouter.post('/drawer/pin', ...managerOnly, async (req, res) => {
 
   res.status(201).json(rows[0]);
 });
-
 managerRouter.delete('/drawer/pin/:terminalId', ...managerOnly, async (req, res) => {
   const { rows } = await pool.query(
     `UPDATE drawer_pins SET cleared_at = now()

@@ -1,5 +1,4 @@
-import { useState, useEffect } from 'react';
-import { Minus, Plus, Trash2, Banknote, Smartphone, ShoppingCart, WifiOff } from 'lucide-react';
+import { Minus, Plus, Trash2, ShoppingCart } from 'lucide-react';
 
 const formatKes = (value) =>
   `KES ${Number(value).toLocaleString('en-KE', { minimumFractionDigits: 2 })}`;
@@ -9,50 +8,12 @@ export function Cart({
   subtotal,
   vat,
   total,
-  online,
-  onCheckoutCash,
-  onCheckoutMpesa,
   checkingOut,
-  paymentStatus,
+  onRequestPayment,
   onRemoveItem,
   onIncrement,
   onDecrement,
 }) {
-  const [method, setMethod] = useState('cash');
-  const [phone, setPhone] = useState('254');
-  const [amountReceived, setAmountReceived] = useState('');
-
-  useEffect(() => {
-    if (items.length === 0) {
-      setAmountReceived('');
-    }
-  }, [items.length]);
-
-  // M-Pesa needs a live round trip through Safaricom, so it can't work
-  // offline. Fall back to cash rather than letting a cashier start a payment
-  // that will time out.
-  useEffect(() => {
-    if (!online && method === 'mpesa_stk') {
-      setMethod('cash');
-    }
-  }, [online, method]);
-
-  const disabled = items.length === 0 || checkingOut;
-
-  const receivedNum = Number(amountReceived) || 0;
-  const change = receivedNum - total;
-  const cashReady = method === 'cash' ? receivedNum >= total : true;
-
-  // Both cash paths go the same way now. Whether the drawer opens is decided
-  // upstream by how the money actually moves, not here.
-  function handlePayClick() {
-    if (method === 'cash') {
-      onCheckoutCash(receivedNum);
-    } else {
-      onCheckoutMpesa(phone);
-    }
-  }
-
   return (
     <aside className="cart">
       <h2 className="cart__title">
@@ -125,79 +86,12 @@ export function Cart({
         </div>
       </div>
 
-      <div className="cart__payment-methods">
-        <button
-          className={`payment-method-btn ${method === 'cash' ? 'payment-method-btn--active' : ''}`}
-          onClick={() => setMethod('cash')}
-          disabled={checkingOut}
-        >
-          <Banknote size={15} />
-          Cash
-        </button>
-        <button
-          className={`payment-method-btn ${method === 'mpesa_stk' ? 'payment-method-btn--active' : ''}`}
-          onClick={() => setMethod('mpesa_stk')}
-          disabled={checkingOut || !online}
-          title={!online ? 'M-Pesa needs an internet connection' : undefined}
-        >
-          <Smartphone size={15} />
-          M-Pesa STK Push
-        </button>
-      </div>
-
-      {!online && (
-        <p className="cart__offline-note">
-          <WifiOff size={13} />
-          No connection to the server. Cash only until it is back.
-        </p>
-      )}
-
-      {method === 'cash' && (
-        <div className="cash-tender">
-          <input
-            className="cash-tender__input"
-            type="number"
-            inputMode="decimal"
-            placeholder="Amount received (KES)"
-            value={amountReceived}
-            onChange={(e) => setAmountReceived(e.target.value)}
-            disabled={checkingOut}
-          />
-          {amountReceived !== '' && (
-            <div className={`cash-tender__change ${change < 0 ? 'cash-tender__change--short' : ''}`}>
-              {change < 0
-                ? `Short by ${formatKes(Math.abs(change))}`
-                : change > 0.001
-                  ? `Change due: ${formatKes(change)}`
-                  : 'Exact amount \u2014 no change'}
-            </div>
-          )}
-        </div>
-      )}
-
-      {method === 'mpesa_stk' && (
-        <input
-          className="cart__phone-input"
-          type="tel"
-          placeholder="2547XXXXXXXX"
-          value={phone}
-          onChange={(e) => setPhone(e.target.value)}
-          disabled={checkingOut}
-        />
-      )}
-
-      {paymentStatus && <p className="cart__payment-status">{paymentStatus}</p>}
-
       <button
         className="checkout-button"
-        disabled={disabled || (method === 'cash' && !cashReady)}
-        onClick={handlePayClick}
+        disabled={items.length === 0 || checkingOut}
+        onClick={onRequestPayment}
       >
-        {checkingOut
-          ? 'Processing...'
-          : method === 'cash'
-            ? 'Complete Cash Sale'
-            : 'Send STK Push'}
+        Complete sale &middot; {formatKes(total)}
       </button>
     </aside>
   );
