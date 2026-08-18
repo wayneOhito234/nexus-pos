@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { calcTotals, SOCKET_EVENTS } from '@nexus-pos/shared';
+import { VAT_RATE, SOCKET_EVENTS } from '@nexus-pos/shared';
 import { TopBar } from './components/TopBar.jsx';
 import { SearchBar } from './components/SearchBar.jsx';
 import { CategoryTabs } from './components/CategoryTabs.jsx';
@@ -29,6 +29,7 @@ import { loadTerminalId, getTerminalId } from './terminalId.js';
 
 const BRANCH_NAME = 'Zummart Supermarket';
 const kes = (v) => `KES ${Number(v || 0).toFixed(2)}`;
+const round2 = (n) => Math.round(n * 100) / 100;
 
 export default function App() {
   const [bootState, setBootState] = useState('checking'); // checking | needs-setup | ready
@@ -139,18 +140,10 @@ export default function App() {
     };
   }, [socketReady]);
 
-  // M-Pesa and split both need a live round trip through Safaricom, so
-  // neither can work offline. If the connection drops while the payment
-  // screen is open there's nothing to fall back to automatically -- the
-  // screen itself disables those modes and the cashier picks cash.
-
-  // Greet the customer once a cashier is on duty and the cart is empty --
-  // but NOT while a receipt is still on screen. A completed sale clears the
-  // cart, which would otherwise fire welcome() the same instant
-  // vfdSaleComplete() writes the change / thank-you, wiping it off the
-  // display before the customer sees it. Holding off until the receipt is
-  // dismissed lets the thank-you stand, then returns to the welcome screen
-  // as the next sale begins.
+  // Greet the customer once a cashier is on duty and the cart is empty, but
+  // not while a receipt is still up. Completing a sale clears the cart, which
+  // would otherwise fire welcome() the same instant the display is showing
+  // the change and thank-you, wiping it before the customer reads it.
   useEffect(() => {
     if (cashier && cart.length === 0 && !receipt) {
       window.nexusVfd?.welcome().catch(() => {});
@@ -175,10 +168,23 @@ export default function App() {
     });
   }, [products, search, category]);
 
-  const { subtotal, vat, total } = useMemo(
-    () => calcTotals(cart.map((item) => ({ price: Number(item.product.price), qty: item.qty }))),
-    [cart]
-  );
+  // Shelf prices are VAT-inclusive, so the total is simply the sum of the
+  // line prices and the VAT is the portion already inside it. This mirrors
+  // the server's calculation exactly and deliberately does NOT use
+  // calcTotals -- that adds VAT on top, which would quote the customer 116
+  // on a 100/= item while the server records 100 and hands back 16 in
+  // change for no reason.
+  const { subtotal, vat, total } = useMemo(() => {
+    const gross = cart.reduce(
+      (sum, item) => sum + Number(item.product.price) * item.qty,
+      0
+    );
+    const t = round2(gross);
+    const v = round2(t - t / (1 + VAT_RATE));
+    return { subtotal: round2(t - v), vat: v, total: t };
+  }, [cart]);
+
+  // ---- Cart ----
 
   function addToCart(product) {
     setCart((prev) => {
@@ -192,13 +198,12 @@ export default function App() {
           )
         : [...prev, { product, qty: 1 }];
 
-      // Show the customer what was just scanned, and the running total.
       const runningTotal = next.reduce(
         (sum, i) => sum + Number(i.product.price) * i.qty,
         0
       );
       window.nexusVfd
-        ?.itemAdded(product.name, Number(product.price), runningTotal)
+        ?.itemAdded(product.name, Number(product.price), round2(runningTotal))
         .catch(() => {});
 
       return next;
@@ -231,7 +236,7 @@ export default function App() {
     });
   }
 
-  function buildReceipt(sale, methodLabel, extra = {}) {
+  function buildReceipt(sale, paymentLabel, extra = {}) {
     return {
       saleId: sale.id,
       localRef: sale.local_ref,
@@ -246,33 +251,34 @@ export default function App() {
       subtotal: sale.subtotal ?? subtotal,
       vat: sale.vat ?? vat,
       total: sale.total ?? total,
-      paymentMethod: methodLabel,
+      paymentMethod: paymentLabel,
       timestamp: new Date(),
       ...extra,
     };
   }
 
   // ============================================================
-  // Checkout
+  // Payment
+  //
+  // Two stages on purpose. "Complete sale" settles the basket and shows the
+  // customer what they owe including VAT; only then does anyone choose how
+  // to pay. That matches how a counter actually works -- the customer
+  // decides once they know the figure.
   //
   // The drawer opens whenever cash physically moves, and only then:
   //
-  //   Cash, any amount        -> opens, because the notes go in
-  //   M-Pesa, exact            -> stays shut, nothing physical moves
-  //   M-Pesa, overpaid          -> opens, change comes out
-  //   Split, cash + M-Pesa      -> opens, because the cash portion goes in
-  //
-  // For any leg that includes M-Pesa, the STK push is sent and confirmed
-  // *before* anything else happens -- no drawer prompt, no sale recorded --
-  // so a declined or timed-out push never leaves cash taken (or a drawer
-  // opened) against a sale that doesn't exist. The PIN gate handles
-  // verification, logging and the kick, so a sale is only posted once the
-  // drawer has actually been authorised and opened.
+  //   Cash, any amount     -> opens, the notes go in
+  //   M-Pesa, exact        -> stays shut, nothing physical moves
+  //   M-Pesa, overpaid     -> opens, change comes out
+  //   Split                -> opens, the cash portion goes in
   // ============================================================
 
   function handleRequestPayment() {
+    if (cart.length === 0) return;
     setPaymentStatus(null);
     setShowPayment(true);
+    // Put the amount due on the customer display while they decide.
+    window.nexusVfd?.checkout(total, 'TOTAL').catch(() => {});
   }
 
   function handlePaymentCancel() {
@@ -281,7 +287,7 @@ export default function App() {
     setCheckingOut(false);
   }
 
-  async function handleTakePayment({ cashAmount, mpesaAmount, phone }) {
+  async function handleTakePayment({ cashAmount = 0, mpesaAmount = 0, phone }) {
     setCheckingOut(true);
     setPaymentStatus(null);
 
@@ -290,14 +296,11 @@ export default function App() {
 
     try {
       if (mpesaAmount > 0) {
-        // Tell the customer display which way they're paying as the request
-        // goes out -- SPLIT when there's also a cash portion, otherwise
-        // M-PESA. vfd.js normalises the casing.
-        window.nexusVfd
-          ?.checkout(total, cashAmount > 0 ? 'SPLIT' : 'M-PESA')
-          .catch(() => {});
+        window.nexusVfd?.checkout(total, 'M-PESA').catch(() => {});
         setPaymentStatus('Sending payment request...');
 
+        // On a split, the push is for the M-Pesa portion only, not the full
+        // total -- the rest is coming in cash.
         const { checkoutRequestId } = await initiateStkPush({
           phone,
           amount: mpesaAmount,
@@ -307,6 +310,7 @@ export default function App() {
         setPaymentStatus(
           `Waiting for the customer to approve on their phone... (ID: ${checkoutRequestId})`
         );
+
         const finalStatus = await pollPaymentStatus(checkoutRequestId);
 
         if (finalStatus.status !== 'confirmed') {
@@ -315,8 +319,8 @@ export default function App() {
           );
           addToast(`Payment ${finalStatus.status}`, 'error');
           setCheckingOut(false);
-          // Nothing was recorded and no drawer was opened, so the cashier
-          // can just try again or switch method from the same screen.
+          // Nothing recorded, no drawer opened, so the cashier can retry or
+          // switch method from the same screen.
           return;
         }
 
@@ -328,12 +332,8 @@ export default function App() {
 
       setPaymentStatus(null);
 
-      // Whatever cash physically moves -- received up front, or change owed
-      // back once the M-Pesa leg is confirmed -- has to go through the
-      // drawer PIN gate before the sale is recorded. A pure, exact M-Pesa
-      // sale never touches the drawer at all.
-      const tendered = cashAmount + mpesaPaid;
-      const change = tendered - total;
+      const tendered = round2(cashAmount + mpesaPaid);
+      const change = round2(tendered - total);
       const cashMoves = cashAmount > 0 || change > 0.001;
 
       if (cashMoves) {
@@ -380,15 +380,15 @@ export default function App() {
     setPendingSale(null);
   }
 
-  async function completeSale({ cashAmount, mpesaAmount, mpesaRef, change = 0 }) {
+  async function completeSale({ cashAmount = 0, mpesaAmount = 0, mpesaRef, change = 0 }) {
     setCheckingOut(true);
     setPaymentStatus(null);
 
     try {
       const sale = await postSale({
         terminal_id: getTerminalId(),
-        cash_amount: cashAmount || 0,
-        mpesa_amount: mpesaAmount || 0,
+        cash_amount: cashAmount,
+        mpesa_amount: mpesaAmount,
         mpesa_ref: mpesaRef ?? null,
         items: cart.map((item) => ({ product_id: item.product.id, qty: item.qty })),
       });
@@ -400,24 +400,22 @@ export default function App() {
             ? 'M-Pesa'
             : 'Cash';
 
-      // Prefer the server's figure, but fall back to the change we already
-      // worked out at payment time, so the receipt and the customer display
-      // still show it even if the server doesn't echo change_given back.
+      // Prefer the server's figure, falling back to what we worked out at
+      // payment time so the receipt and display still show it either way.
       const changeGiven = Number(sale.change_given ?? change ?? 0);
 
-      // Build and show the receipt BEFORE clearing the cart -- buildReceipt
-      // reads the line items off the cart, and the Receipt component
-      // auto-prints when it mounts.
+      // Build the receipt BEFORE clearing the cart -- buildReceipt reads the
+      // line items off it, and Receipt auto-prints when it mounts.
       setReceipt(
         buildReceipt(sale, label, {
           cashAmount: sale.cash_amount ?? cashAmount,
           mpesaAmount: sale.mpesa_amount ?? mpesaAmount,
+          amountReceived: sale.amount_received,
           changeGiven,
           mpesaRef: sale.mpesa_ref ?? mpesaRef,
         })
       );
 
-      // Customer display: change if any came back, otherwise the thank-you.
       window.nexusVfd
         ?.saleComplete(changeGiven, label.toUpperCase())
         .catch(() => {});

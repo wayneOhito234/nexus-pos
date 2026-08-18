@@ -31,6 +31,17 @@ export function PaymentScreen({ total, vat, online, busy, status, onTake, onCanc
     (!needsPhone || phoneValid) &&
     (mode !== 'split' || (cash > 0 && mpesa > 0));
 
+  // Quick-tender buttons for what a cashier is actually handed. Deduplicated
+  // through a Set, because the round-up figure frequently coincides with a
+  // note value -- on a 406 total both come out as 500.
+  const quickAmounts = useMemo(() => {
+    const notes = [50, 100, 200, 500, 1000].filter((n) => n > total);
+    const roundUp = Math.ceil(total / 100) * 100;
+    const set = new Set(notes);
+    if (roundUp > total) set.add(roundUp);
+    return [...set].sort((a, b) => a - b).slice(0, 4);
+  }, [total]);
+
   function take() {
     onTake({
       cashAmount: mode === 'mpesa' ? 0 : cash,
@@ -39,9 +50,12 @@ export function PaymentScreen({ total, vat, online, busy, status, onTake, onCanc
     });
   }
 
-  // Quick-tender buttons for the notes a cashier actually handles.
-  const suggestions = [50, 100, 200, 500, 1000].filter((n) => n >= total);
-  const roundUp = Math.ceil(total / 100) * 100;
+  // On a split, prefill the cash side with whatever the M-Pesa leg leaves
+  // outstanding. Saves the cashier doing the subtraction mid-queue.
+  function fillRemainingCash() {
+    const remaining = Math.max(0, Math.round((total - mpesa) * 100) / 100);
+    setCashInput(String(remaining));
+  }
 
   return (
     <div className="pay-overlay">
@@ -50,6 +64,8 @@ export function PaymentScreen({ total, vat, online, busy, status, onTake, onCanc
           <X size={18} />
         </button>
 
+        {/* Deliberately the largest thing on screen -- the customer reads
+            this from across the counter. */}
         <div className="pay__due">
           <span>Amount due</span>
           <strong>{kes(total)}</strong>
@@ -92,6 +108,21 @@ export function PaymentScreen({ total, vat, online, busy, status, onTake, onCanc
           </p>
         )}
 
+        {mode === 'split' && (
+          <label className="pay__field">
+            <span>Paid by M-Pesa</span>
+            <input
+              type="number"
+              inputMode="decimal"
+              value={mpesaInput}
+              onChange={(e) => setMpesaInput(e.target.value)}
+              placeholder="0.00"
+              autoFocus
+              disabled={busy}
+            />
+          </label>
+        )}
+
         {(mode === 'cash' || mode === 'split') && (
           <label className="pay__field">
             <span>{mode === 'split' ? 'Paid in cash' : 'Cash received'}</span>
@@ -107,36 +138,25 @@ export function PaymentScreen({ total, vat, online, busy, status, onTake, onCanc
           </label>
         )}
 
-        {mode === 'cash' && suggestions.length > 0 && (
+        {mode === 'cash' && (
           <div className="pay__quick">
             <button onClick={() => setCashInput(String(total))} disabled={busy}>
               Exact
             </button>
-            {roundUp > total && (
-              <button onClick={() => setCashInput(String(roundUp))} disabled={busy}>
-                {kes(roundUp)}
-              </button>
-            )}
-            {suggestions.slice(0, 3).map((n) => (
+            {quickAmounts.map((n) => (
               <button key={n} onClick={() => setCashInput(String(n))} disabled={busy}>
-                {n}
+                {n.toLocaleString('en-KE')}
               </button>
             ))}
           </div>
         )}
 
-        {mode === 'split' && (
-          <label className="pay__field">
-            <span>Paid by M-Pesa</span>
-            <input
-              type="number"
-              inputMode="decimal"
-              value={mpesaInput}
-              onChange={(e) => setMpesaInput(e.target.value)}
-              placeholder="0.00"
-              disabled={busy}
-            />
-          </label>
+        {mode === 'split' && mpesa > 0 && mpesa < total && (
+          <div className="pay__quick">
+            <button onClick={fillRemainingCash} disabled={busy}>
+              Rest in cash &middot; {kes(total - mpesa)}
+            </button>
+          </div>
         )}
 
         {needsPhone && (
@@ -159,9 +179,12 @@ export function PaymentScreen({ total, vat, online, busy, status, onTake, onCanc
           {mode === 'split' && (
             <div className="pay__tally-row">
               <span>Covered</span>
-              <strong>{kes(tendered)} of {kes(total)}</strong>
+              <strong>
+                {kes(tendered)} of {kes(total)}
+              </strong>
             </div>
           )}
+
           {shortfall > 0.01 ? (
             <div className="pay__tally-row is-short">
               <span>Still owing</span>

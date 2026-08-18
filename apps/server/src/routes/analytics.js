@@ -9,9 +9,15 @@ export const analyticsRouter = Router();
 // because the till's own KPI strip uses it.
 const managerRead = [managerIpGuard, requireAuth];
 
+// Cash and M-Pesa totals always come from cash_amount and mpesa_amount, never
+// from filtering on payment_method. A split sale is stored as 'split', so
+// filtering would drop both its legs -- the cash half would vanish from the
+// day's takings while sitting in the drawer, and the till would look short by
+// exactly that amount at close.
+
 // GET /api/analytics/summary
-// Today's totals, a 7-day trend, top products, and a payment method
-// breakdown -- everything the analytics panel needs in one call.
+// Today's totals, a 7-day trend, top products, and a payment breakdown --
+// everything the analytics panel needs in one call.
 analyticsRouter.get('/summary', async (req, res) => {
   const { rows: todayRows } = await pool.query(`
     SELECT COALESCE(SUM(total), 0) AS total_sales, COUNT(*) AS transaction_count
@@ -43,34 +49,39 @@ analyticsRouter.get('/summary', async (req, res) => {
     LIMIT 5
   `);
 
-  const { rows: paymentBreakdown } = await pool.query(`
-    SELECT payment_method, COUNT(*) AS count, COALESCE(SUM(total), 0) AS total
+  // Split by where the money actually went, rather than by the label on the
+  // sale, so a split contributes to both figures.
+  const { rows: payment } = await pool.query(`
+    SELECT
+      COALESCE(SUM(cash_amount), 0)           AS cash_total,
+      COALESCE(SUM(mpesa_amount), 0)          AS mpesa_total,
+      COUNT(*) FILTER (WHERE cash_amount > 0) AS cash_count,
+      COUNT(*) FILTER (WHERE mpesa_amount > 0) AS mpesa_count
     FROM sales
     WHERE created_at::date = CURRENT_DATE
-    GROUP BY payment_method
   `);
+
+  const p = payment[0];
 
   res.json({
     todaySales: Number(todayRows[0].total_sales),
     transactionCount: Number(todayRows[0].transaction_count),
     trend: trendRows.map((r) => ({ label: r.label.trim(), total: Number(r.total) })),
     topProducts: topProducts.map((r) => ({ name: r.name, qty: Number(r.qty_sold) })),
-    paymentBreakdown: paymentBreakdown.map((r) => ({
-      method: r.payment_method,
-      count: Number(r.count),
-      total: Number(r.total),
-    })),
+    paymentBreakdown: [
+      { method: 'cash', count: Number(p.cash_count), total: Number(p.cash_total) },
+      { method: 'mpesa', count: Number(p.mpesa_count), total: Number(p.mpesa_total) },
+    ],
   });
 });
 
 // GET /api/analytics/breakdown?period=day|week|month
-// Totals split by till, payment method and cashier -- what a manager
-// actually reconciles against at close.
+// Totals split by till, payment type and cashier -- what a manager actually
+// reconciles against at close.
 //
 // `since` is interpolated rather than parameterised because Postgres won't
 // accept date_trunc's unit as a bound parameter. Safe here since `period` is
-// validated against a fixed list first, so nothing user-supplied ever
-// reaches the SQL.
+// validated against a fixed list first, so nothing user-supplied reaches SQL.
 analyticsRouter.get('/breakdown', ...managerRead, async (req, res) => {
   const period = ['day', 'week', 'month'].includes(req.query.period) ? req.query.period : 'day';
 
@@ -82,27 +93,34 @@ analyticsRouter.get('/breakdown', ...managerRead, async (req, res) => {
 
   const { rows: byTerminal } = await pool.query(`
     SELECT terminal_id,
-           COUNT(*)                AS sale_count,
-           COALESCE(SUM(total), 0) AS revenue
+           COUNT(*)                       AS sale_count,
+           COALESCE(SUM(total), 0)        AS revenue,
+           COALESCE(SUM(cash_amount), 0)  AS cash_taken,
+           COALESCE(SUM(mpesa_amount), 0) AS mpesa_taken,
+           COALESCE(SUM(change_given), 0) AS change_given
     FROM sales
     WHERE created_at >= ${since}
     GROUP BY terminal_id
     ORDER BY terminal_id
   `);
 
-  const { rows: byMethod } = await pool.query(`
-    SELECT payment_method,
-           COUNT(*)                AS sale_count,
-           COALESCE(SUM(total), 0) AS revenue
+  const { rows: payment } = await pool.query(`
+    SELECT
+      COALESCE(SUM(cash_amount), 0)            AS cash_total,
+      COALESCE(SUM(mpesa_amount), 0)           AS mpesa_total,
+      COUNT(*) FILTER (WHERE cash_amount > 0)  AS cash_count,
+      COUNT(*) FILTER (WHERE mpesa_amount > 0) AS mpesa_count,
+      COUNT(*) FILTER (WHERE cash_amount > 0 AND mpesa_amount > 0) AS split_count
     FROM sales
     WHERE created_at >= ${since}
-    GROUP BY payment_method
   `);
 
   const { rows: byCashier } = await pool.query(`
     SELECT c.name AS cashier_name,
-           COUNT(*)                  AS sale_count,
-           COALESCE(SUM(s.total), 0) AS revenue
+           COUNT(*)                         AS sale_count,
+           COALESCE(SUM(s.total), 0)        AS revenue,
+           COALESCE(SUM(s.cash_amount), 0)  AS cash_taken,
+           COALESCE(SUM(s.mpesa_amount), 0) AS mpesa_taken
     FROM sales s
     JOIN cashiers c ON c.id = s.cashier_id
     WHERE s.created_at >= ${since}
@@ -118,7 +136,21 @@ analyticsRouter.get('/breakdown', ...managerRead, async (req, res) => {
     WHERE created_at >= ${since}
   `);
 
-  res.json({ period, totals: totals[0], byTerminal, byMethod, byCashier });
+  const p = payment[0];
+
+  res.json({
+    period,
+    totals: totals[0],
+    byTerminal,
+    byCashier,
+    // Reported as two figures rather than three categories: a split sale
+    // belongs in both, since money genuinely arrived by both routes.
+    byMethod: [
+      { method: 'cash', sale_count: Number(p.cash_count), revenue: Number(p.cash_total) },
+      { method: 'mpesa', sale_count: Number(p.mpesa_count), revenue: Number(p.mpesa_total) },
+    ],
+    split_sales: Number(p.split_count),
+  });
 });
 
 // GET /api/analytics/receipt/:saleId
@@ -152,8 +184,8 @@ analyticsRouter.get('/receipt/:saleId', ...managerRead, async (req, res) => {
 // against the previous equivalent period.
 //
 // Note the deliberate asymmetry: revenue comes from the sales table alone,
-// while cost of goods only counts products that have a cost_price. Margin
-// is therefore reported against costed revenue, and a coverage figure is
+// while cost of goods only counts products that have a cost_price. Margin is
+// therefore reported against costed revenue, and a coverage figure is
 // returned so the UI can be honest about what the number covers.
 analyticsRouter.get('/balance-sheet', ...managerRead, async (req, res) => {
   const period = ['day', 'week', 'month', 'year'].includes(req.query.period)
@@ -178,10 +210,10 @@ analyticsRouter.get('/balance-sheet', ...managerRead, async (req, res) => {
 
   const { rows: current } = await pool.query(`
     SELECT
-      COUNT(DISTINCT s.id)                                    AS sale_count,
-      COALESCE(SUM(si.qty * si.price), 0)                     AS costed_revenue,
-      COALESCE(SUM(si.qty * p.cost_price), 0)                 AS cogs,
-      COALESCE(SUM(si.qty * (si.price - p.cost_price)), 0)    AS gross_profit
+      COUNT(DISTINCT s.id)                                 AS sale_count,
+      COALESCE(SUM(si.qty * si.price), 0)                  AS costed_revenue,
+      COALESCE(SUM(si.qty * p.cost_price), 0)              AS cogs,
+      COALESCE(SUM(si.qty * (si.price - p.cost_price)), 0) AS gross_profit
     FROM sales s
     JOIN sale_items si ON si.sale_id = s.id
     JOIN products   p  ON p.id = si.product_id
@@ -191,9 +223,9 @@ analyticsRouter.get('/balance-sheet', ...managerRead, async (req, res) => {
 
   const { rows: previous } = await pool.query(`
     SELECT
-      COALESCE(SUM(si.qty * si.price), 0)                     AS costed_revenue,
-      COALESCE(SUM(si.qty * p.cost_price), 0)                 AS cogs,
-      COALESCE(SUM(si.qty * (si.price - p.cost_price)), 0)    AS gross_profit
+      COALESCE(SUM(si.qty * si.price), 0)                  AS costed_revenue,
+      COALESCE(SUM(si.qty * p.cost_price), 0)              AS cogs,
+      COALESCE(SUM(si.qty * (si.price - p.cost_price)), 0) AS gross_profit
     FROM sales s
     JOIN sale_items si ON si.sale_id = s.id
     JOIN products   p  ON p.id = si.product_id
@@ -214,23 +246,23 @@ analyticsRouter.get('/balance-sheet', ...managerRead, async (req, res) => {
     WHERE created_at >= ${prevSince} AND created_at < ${prevUntil}
   `);
 
-  const { rows: byMethod } = await pool.query(`
-    SELECT payment_method,
-           COUNT(*)                AS sale_count,
-           COALESCE(SUM(total), 0) AS revenue
+  const { rows: payment } = await pool.query(`
+    SELECT
+      COALESCE(SUM(cash_amount), 0)            AS cash_total,
+      COALESCE(SUM(mpesa_amount), 0)           AS mpesa_total,
+      COUNT(*) FILTER (WHERE cash_amount > 0)  AS cash_count,
+      COUNT(*) FILTER (WHERE mpesa_amount > 0) AS mpesa_count
     FROM sales
     WHERE created_at >= ${since}
-    GROUP BY payment_method
-    ORDER BY revenue DESC
   `);
 
   const { rows: byCategory } = await pool.query(`
     SELECT
       p.category,
-      SUM(si.qty)                                              AS units_sold,
-      COALESCE(SUM(si.qty * si.price), 0)                     AS revenue,
-      COALESCE(SUM(si.qty * p.cost_price), 0)                 AS cogs,
-      COALESCE(SUM(si.qty * (si.price - p.cost_price)), 0)    AS gross_profit
+      SUM(si.qty)                                          AS units_sold,
+      COALESCE(SUM(si.qty * si.price), 0)                  AS revenue,
+      COALESCE(SUM(si.qty * p.cost_price), 0)              AS cogs,
+      COALESCE(SUM(si.qty * (si.price - p.cost_price)), 0) AS gross_profit
     FROM sale_items si
     JOIN products p  ON p.id = si.product_id
     JOIN sales    s  ON s.id = si.sale_id
@@ -250,6 +282,7 @@ analyticsRouter.get('/balance-sheet', ...managerRead, async (req, res) => {
   const cur = current[0];
   const prev = previous[0];
   const rev = totalRevenue[0];
+  const pay = payment[0];
 
   const pct = (now, before) =>
     Number(before) > 0 ? ((Number(now) - Number(before)) / Number(before)) * 100 : null;
@@ -262,6 +295,8 @@ analyticsRouter.get('/balance-sheet', ...managerRead, async (req, res) => {
       costed_revenue: Number(cur.costed_revenue),
       cogs:           Number(cur.cogs),
       gross_profit:   Number(cur.gross_profit),
+      // Margin against costed revenue, not total -- dividing profit by
+      // revenue that includes uncosted items would understate it.
       margin_pct: Number(cur.costed_revenue) > 0
         ? (Number(cur.gross_profit) / Number(cur.costed_revenue)) * 100
         : 0,
@@ -279,11 +314,10 @@ analyticsRouter.get('/balance-sheet', ...managerRead, async (req, res) => {
       products_with_cost: Number(coverage[0].costed),
       products_total:     Number(coverage[0].total),
     },
-    byMethod: byMethod.map((r) => ({
-      method:     r.payment_method,
-      sale_count: Number(r.sale_count),
-      revenue:    Number(r.revenue),
-    })),
+    byMethod: [
+      { method: 'cash', sale_count: Number(pay.cash_count), revenue: Number(pay.cash_total) },
+      { method: 'mpesa', sale_count: Number(pay.mpesa_count), revenue: Number(pay.mpesa_total) },
+    ],
     byCategory: byCategory.map((r) => ({
       category:     r.category,
       units_sold:   Number(r.units_sold),
@@ -308,10 +342,10 @@ analyticsRouter.get('/top-products', ...managerRead, async (req, res) => {
       p.id, p.name, p.sku, p.category,
       p.price      AS selling_price,
       p.cost_price,
-      SUM(si.qty)                                              AS units_sold,
-      COALESCE(SUM(si.qty * si.price), 0)                     AS revenue,
-      COALESCE(SUM(si.qty * p.cost_price), 0)                 AS cogs,
-      COALESCE(SUM(si.qty * (si.price - p.cost_price)), 0)    AS gross_profit
+      SUM(si.qty)                                          AS units_sold,
+      COALESCE(SUM(si.qty * si.price), 0)                  AS revenue,
+      COALESCE(SUM(si.qty * p.cost_price), 0)              AS cogs,
+      COALESCE(SUM(si.qty * (si.price - p.cost_price)), 0) AS gross_profit
     FROM products p
     JOIN sale_items si ON si.product_id = p.id
     JOIN sales      s  ON s.id = si.sale_id
@@ -455,8 +489,8 @@ analyticsRouter.get('/stock-value', ...managerRead, async (req, res) => {
     cost_value: Number(t.cost_value),
     retail_value: Number(t.retail_value),
     potential_profit: Number(t.retail_value) - Number(t.cost_value),
-    // Cost value excludes anything without a cost price, so a high count
-    // here means the figure is an undercount rather than wrong.
+    // Cost value excludes anything without a cost price, so a high count here
+    // means the figure is an undercount rather than wrong.
     products_missing_cost: Number(t.missing_cost),
     shelf_value: Number(byLocation[0].shelf_value),
     store_value: Number(byLocation[0].store_value),
@@ -477,9 +511,9 @@ analyticsRouter.get('/shrinkage', ...managerRead, async (req, res) => {
   const { rows: byReason } = await pool.query(
     `SELECT
        m.reason,
-       COUNT(*)                                            AS event_count,
-       SUM(ABS(m.qty_change))                              AS units_lost,
-       COALESCE(SUM(ABS(m.qty_change) * p.cost_price), 0)  AS value_lost
+       COUNT(*)                                           AS event_count,
+       SUM(ABS(m.qty_change))                             AS units_lost,
+       COALESCE(SUM(ABS(m.qty_change) * p.cost_price), 0) AS value_lost
      FROM stock_movements m
      JOIN products p ON p.id = m.product_id
      WHERE m.movement_type = 'adjustment'
@@ -493,8 +527,8 @@ analyticsRouter.get('/shrinkage', ...managerRead, async (req, res) => {
   const { rows: byProduct } = await pool.query(
     `SELECT
        p.id, p.name, p.sku,
-       SUM(ABS(m.qty_change))                              AS units_lost,
-       COALESCE(SUM(ABS(m.qty_change) * p.cost_price), 0)  AS value_lost
+       SUM(ABS(m.qty_change))                             AS units_lost,
+       COALESCE(SUM(ABS(m.qty_change) * p.cost_price), 0) AS value_lost
      FROM stock_movements m
      JOIN products p ON p.id = m.product_id
      WHERE m.movement_type = 'adjustment'
@@ -542,12 +576,12 @@ analyticsRouter.get('/shrinkage', ...managerRead, async (req, res) => {
 
 // GET /api/analytics/dashboard
 // The owner's one screen: how the day went, and anything worth looking at.
-// Assembled from several small queries rather than one large join, since
-// each answers a different question.
+// Assembled from several small queries rather than one large join, since each
+// answers a different question.
 analyticsRouter.get('/dashboard', ...managerRead, async (req, res) => {
   const q = (sql) => pool.query(sql);
 
-  const [today, week, month, byTerminal, byMethod, lowStock, owed, negative, drawer, noPin, variance] =
+  const [today, week, month, byTerminal, payment, lowStock, owed, negative, drawer, noPin, variance] =
     await Promise.all([
       q(`
         SELECT COALESCE(SUM(total),0) AS revenue, COUNT(*) AS sale_count,
@@ -563,14 +597,20 @@ analyticsRouter.get('/dashboard', ...managerRead, async (req, res) => {
         FROM sales WHERE created_at >= date_trunc('month', now())
       `),
       q(`
-        SELECT terminal_id, COUNT(*) AS sale_count, COALESCE(SUM(total),0) AS revenue
+        SELECT terminal_id,
+               COUNT(*)                       AS sale_count,
+               COALESCE(SUM(total),0)         AS revenue,
+               COALESCE(SUM(cash_amount),0)   AS cash_taken,
+               COALESCE(SUM(mpesa_amount),0)  AS mpesa_taken
         FROM sales WHERE created_at >= date_trunc('day', now())
         GROUP BY terminal_id ORDER BY terminal_id
       `),
       q(`
-        SELECT payment_method, COALESCE(SUM(total),0) AS revenue
+        SELECT COALESCE(SUM(cash_amount),0)   AS cash,
+               COALESCE(SUM(mpesa_amount),0)  AS mpesa,
+               COALESCE(SUM(change_given),0)  AS change_given,
+               COUNT(*) FILTER (WHERE cash_amount > 0 AND mpesa_amount > 0) AS split_count
         FROM sales WHERE created_at >= date_trunc('day', now())
-        GROUP BY payment_method
       `),
       q(`
         SELECT id, name, sku, stock_qty, store_qty, reorder_level
@@ -609,11 +649,18 @@ analyticsRouter.get('/dashboard', ...managerRead, async (req, res) => {
       `),
     ]);
 
-  const cash = Number(byMethod.rows.find((r) => r.payment_method === 'cash')?.revenue || 0);
-  const mpesa = Number(byMethod.rows.find((r) => r.payment_method !== 'cash')?.revenue || 0);
+  const pay = payment.rows[0];
 
   res.json({
-    today: { ...today.rows[0], cash, mpesa },
+    today: {
+      ...today.rows[0],
+      cash: Number(pay.cash),
+      mpesa: Number(pay.mpesa),
+      // Change leaves the drawer, so it matters for what should be in there
+      // at close even though it isn't revenue.
+      change_given: Number(pay.change_given),
+      split_sales: Number(pay.split_count),
+    },
     week: week.rows[0],
     month: month.rows[0],
     byTerminal: byTerminal.rows,

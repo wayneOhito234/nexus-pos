@@ -119,10 +119,18 @@ managerRouter.post('/cashiers/login', tillIpGuard, async (req, res) => {
     return res.status(409).json({ error: `${terminalOccupied[0].name} is already clocked in on this terminal` });
   }
 
-  // The float is recorded at the start of the shift rather than recalled at
-  // close. Without it the cash variance would show a surplus every day
-  // equal to whatever change the drawer opened with.
-  const openingFloat = terminal.length > 0 ? Number(terminal[0].default_float) : 0;
+  // The float comes from today's till day if the manager has opened it,
+  // falling back to the terminal's default. A till with neither starts at
+  // zero, which the reconciliation shows as an unexplained surplus --
+  // deliberately visible rather than quietly assumed.
+  const { rows: dayRow } = await pool.query(
+    'SELECT opening_float FROM till_days WHERE terminal_id = $1 AND business_date = CURRENT_DATE',
+    [terminal_id]
+  );
+
+  const openingFloat = dayRow.length > 0
+    ? Number(dayRow[0].opening_float)
+    : (terminal.length > 0 ? Number(terminal[0].default_float) : 0);
 
   await pool.query(
     'INSERT INTO shifts (cashier_id, terminal_id, opening_float) VALUES ($1, $2, $3)',
@@ -136,7 +144,8 @@ managerRouter.post('/cashiers/login', tillIpGuard, async (req, res) => {
 
 // POST /api/manager/staff/login
 // body: { first_name, last_name, password }
-// No shift is opened, because a manager isn't occupying a till.
+// The manager app's sign-in. No shift is opened, because a manager isn't
+// occupying a till.
 managerRouter.post('/staff/login', managerIpGuard, async (req, res) => {
   const { first_name, last_name, password } = req.body;
 
@@ -197,6 +206,43 @@ managerRouter.get('/staff', ...managerOnly, async (req, res) => {
   res.json(rows);
 });
 
+// POST /api/manager/cashiers/register
+// body: { first_name, last_name, password, role? }
+managerRouter.post('/cashiers/register', ...managerOnly, async (req, res) => {
+  const { first_name, last_name, password, role } = req.body;
+
+  if (!first_name || !last_name || !password) {
+    return res.status(400).json({ error: 'first_name, last_name and password are required' });
+  }
+  if (password.length < 4) {
+    return res.status(400).json({ error: 'Password must be at least 4 characters' });
+  }
+
+  const fullName = `${first_name} ${last_name}`.trim();
+
+  const { rows: existing } = await pool.query(
+    'SELECT id FROM cashiers WHERE first_name = $1 AND last_name = $2',
+    [first_name, last_name]
+  );
+  if (existing.length > 0) {
+    return res.status(409).json({ error: 'Someone with that name already exists' });
+  }
+
+  const passwordHash = await bcrypt.hash(password, 10);
+
+  const { rows } = await pool.query(
+    `INSERT INTO cashiers (name, first_name, last_name, password_hash, role)
+     VALUES ($1, $2, $3, $4, $5)
+     RETURNING id, name, first_name, last_name, role, active`,
+    [fullName, first_name, last_name, passwordHash, role || 'cashier']
+  );
+
+  res.status(201).json(rows[0]);
+});
+
+// PATCH /api/manager/cashiers/:id/active
+// body: { active }
+//
 // Deactivation is the usual way to remove someone -- shift history and sales
 // attribution survive, which deletion sacrifices.
 managerRouter.patch('/cashiers/:id/active', ...managerOnly, async (req, res) => {
@@ -365,7 +411,6 @@ managerRouter.get('/terminals', ...managerOnly, async (req, res) => {
   );
 });
 
-
 // PATCH /api/manager/terminals/:terminalId
 // body: { active, reason?, label?, default_float? }
 managerRouter.patch('/terminals/:terminalId', ...managerOnly, async (req, res) => {
@@ -417,6 +462,141 @@ managerRouter.patch('/terminals/:terminalId', ...managerOnly, async (req, res) =
 });
 
 // ============================================================
+// Till days
+//
+// The drawer belongs to the till, not the cashier, so the float is counted
+// once per till per day and every shift that day works against the same
+// drawer.
+// ============================================================
+
+// GET /api/manager/till-days
+// Today's float and live drawer position for every till.
+managerRouter.get('/till-days', ...managerOnly, async (req, res) => {
+  const configured = siteConfig.tillIps.map((_, i) => `till-${i + 1}`);
+
+  const { rows: days } = await pool.query(`
+    SELECT d.terminal_id, d.opening_float, d.opened_at, d.closing_count,
+           d.closed_at, d.notes, c.name AS opened_by_name
+    FROM till_days d
+    LEFT JOIN cashiers c ON c.id = d.opened_by
+    WHERE d.business_date = CURRENT_DATE
+  `);
+  const byTill = new Map(days.map((d) => [d.terminal_id, d]));
+
+  // Cash in and out come from the amount columns, never from filtering on
+  // payment_method. A split sale is stored as 'split', so filtering would
+  // drop its cash half -- money that is physically in the drawer would
+  // vanish from the figures and the till would look short at close.
+  const { rows: movement } = await pool.query(`
+    SELECT terminal_id,
+           COALESCE(SUM(cash_amount), 0)           AS cash_in,
+           COALESCE(SUM(change_given), 0)          AS cash_out,
+           COALESCE(SUM(mpesa_amount), 0)          AS mpesa_taken,
+           COUNT(*) FILTER (WHERE cash_amount > 0) AS cash_sales,
+           COUNT(*)                                AS sale_count
+    FROM sales
+    WHERE created_at::date = CURRENT_DATE
+    GROUP BY terminal_id
+  `);
+  const byMovement = new Map(movement.map((m) => [m.terminal_id, m]));
+
+  const { rows: onDuty } = await pool.query(`
+    SELECT s.terminal_id, c.name AS cashier_name
+    FROM shifts s JOIN cashiers c ON c.id = s.cashier_id
+    WHERE s.clock_out IS NULL
+  `);
+  const busy = new Map(onDuty.map((r) => [r.terminal_id, r.cashier_name]));
+
+  res.json(
+    configured.map((till) => {
+      const day = byTill.get(till);
+      const m = byMovement.get(till) || {};
+
+      const openingFloat = day ? Number(day.opening_float) : null;
+      const cashIn = Number(m.cash_in || 0);
+      const cashOut = Number(m.cash_out || 0);
+      const expected = day ? round2(openingFloat + cashIn - cashOut) : null;
+
+      return {
+        terminal_id: till,
+        opened: !!day,
+        opening_float: openingFloat,
+        opened_by_name: day?.opened_by_name ?? null,
+        opened_at: day?.opened_at ?? null,
+        cash_in: cashIn,
+        cash_out: cashOut,
+        mpesa_taken: Number(m.mpesa_taken || 0),
+        cash_sales: Number(m.cash_sales || 0),
+        sale_count: Number(m.sale_count || 0),
+        expected_cash: expected,
+        closing_count: day?.closing_count != null ? Number(day.closing_count) : null,
+        closed_at: day?.closed_at ?? null,
+        notes: day?.notes ?? null,
+        variance:
+          day?.closing_count != null && expected != null
+            ? round2(Number(day.closing_count) - expected)
+            : null,
+        current_cashier: busy.get(till) || null,
+      };
+    })
+  );
+});
+
+// POST /api/manager/till-days/open
+// body: { terminal_id, opening_float }
+// The morning float count. Re-running it corrects a mistake.
+managerRouter.post('/till-days/open', ...managerOnly, async (req, res) => {
+  const { terminal_id, opening_float } = req.body;
+
+  if (!terminal_id || opening_float === undefined || Number.isNaN(Number(opening_float))) {
+    return res.status(400).json({ error: 'A till and the amount in the drawer are required' });
+  }
+  if (Number(opening_float) < 0) {
+    return res.status(400).json({ error: 'The float cannot be negative' });
+  }
+
+  const { rows } = await pool.query(
+    `INSERT INTO till_days (terminal_id, business_date, opening_float, opened_by)
+     VALUES ($1, CURRENT_DATE, $2, $3)
+     ON CONFLICT (terminal_id, business_date)
+     DO UPDATE SET opening_float = EXCLUDED.opening_float,
+                   opened_by = EXCLUDED.opened_by,
+                   opened_at = now()
+     RETURNING *`,
+    [terminal_id, round2(Number(opening_float)), req.session.cashierId]
+  );
+
+  res.status(201).json(rows[0]);
+});
+
+// POST /api/manager/till-days/close
+// body: { terminal_id, closing_count, notes? }
+managerRouter.post('/till-days/close', ...managerOnly, async (req, res) => {
+  const { terminal_id, closing_count, notes } = req.body;
+
+  if (!terminal_id || closing_count === undefined || Number.isNaN(Number(closing_count))) {
+    return res.status(400).json({ error: 'A till and the counted amount are required' });
+  }
+  if (Number(closing_count) < 0) {
+    return res.status(400).json({ error: 'The counted amount cannot be negative' });
+  }
+
+  const { rows } = await pool.query(
+    `UPDATE till_days
+     SET closing_count = $1, closed_by = $2, closed_at = now(), notes = $3
+     WHERE terminal_id = $4 AND business_date = CURRENT_DATE
+     RETURNING *`,
+    [round2(Number(closing_count)), req.session.cashierId, notes?.trim() || null, terminal_id]
+  );
+
+  if (rows.length === 0) {
+    return res.status(404).json({ error: 'That till was not opened today' });
+  }
+
+  res.json(rows[0]);
+});
+
+// ============================================================
 // Shifts
 // ============================================================
 
@@ -442,11 +622,18 @@ managerRouter.post('/shifts/clock-in', requireAuth, async (req, res) => {
     return res.status(409).json({ error: `${terminalOccupied[0].name} is already clocked in on this terminal` });
   }
 
+  const { rows: dayRow } = await pool.query(
+    'SELECT opening_float FROM till_days WHERE terminal_id = $1 AND business_date = CURRENT_DATE',
+    [terminal_id]
+  );
   const { rows: floatRow } = await pool.query(
     'SELECT default_float FROM terminals WHERE terminal_id = $1',
     [terminal_id]
   );
-  const openingFloat = floatRow.length > 0 ? Number(floatRow[0].default_float) : 0;
+
+  const openingFloat = dayRow.length > 0
+    ? Number(dayRow[0].opening_float)
+    : (floatRow.length > 0 ? Number(floatRow[0].default_float) : 0);
 
   const { rows } = await pool.query(
     'INSERT INTO shifts (cashier_id, terminal_id, opening_float) VALUES ($1, $2, $3) RETURNING *',
@@ -479,7 +666,7 @@ managerRouter.post('/shifts/clock-out', requireAuth, async (req, res) => {
 
 // POST /api/manager/shifts/clock-out-all
 // Emergency reset. Ends every shift and every session at once. Shifts closed
-// this way have no cash count, which is the honest record of what happened.
+// this way carry no cash count, which is the honest record of what happened.
 managerRouter.post('/shifts/clock-out-all', requireAuth, async (req, res) => {
   const { rows } = await pool.query(`
     UPDATE shifts SET clock_out = now()
@@ -513,15 +700,14 @@ managerRouter.get('/shifts/history', ...managerOnly, async (req, res) => {
 // shift's own sales, never supplied by the client -- otherwise the figure
 // being checked against could be adjusted to match the count.
 //
-// Sales can be split across tenders (part cash, part M-Pesa) and cash sales
-// can hand back change, so expected cash is built from the per-sale
-// cash_amount and change_given columns rather than bucketing a whole sale
-// by a single payment_method.
+// Every figure comes from cash_amount, mpesa_amount and change_given rather
+// than from filtering on payment_method, so split sales contribute their
+// cash half correctly.
 // ============================================================
 
 // GET /api/manager/shifts/current-summary
-// What the till shows at close: the float it started with, cash taken, and
-// what should therefore be in the drawer.
+// What the till shows at close: the float it started with, cash taken, change
+// handed back, and what should therefore be in the drawer.
 managerRouter.get('/shifts/current-summary', tillIpGuard, requireAuth, async (req, res) => {
   const { rows: shift } = await pool.query(
     `SELECT id, terminal_id, clock_in, opening_float
@@ -538,11 +724,11 @@ managerRouter.get('/shifts/current-summary', tillIpGuard, requireAuth, async (re
 
   const { rows: takings } = await pool.query(
     `SELECT
-       COALESCE(SUM(cash_amount), 0)   AS cash_in,
-       COALESCE(SUM(mpesa_amount), 0)  AS mpesa_in,
-       COALESCE(SUM(change_given), 0)  AS change_out,
-       COUNT(*)                        AS sale_count,
-       COUNT(*) FILTER (WHERE cash_amount > 0) AS cash_count
+       COALESCE(SUM(cash_amount), 0)            AS cash_in,
+       COALESCE(SUM(mpesa_amount), 0)           AS mpesa_in,
+       COALESCE(SUM(change_given), 0)           AS change_out,
+       COUNT(*)                                 AS sale_count,
+       COUNT(*) FILTER (WHERE cash_amount > 0)  AS cash_count
      FROM sales
      WHERE cashier_id = $1 AND created_at >= $2`,
     [req.session.cashierId, s.clock_in]
@@ -569,7 +755,7 @@ managerRouter.get('/shifts/current-summary', tillIpGuard, requireAuth, async (re
     sale_count: Number(takings[0].sale_count),
     cash_sale_count: Number(takings[0].cash_count),
     drawer_opens: drawerOpens[0].count,
-    // Cash in, less any change handed back, on top of the opening float.
+    // Cash that came in, less any change handed back, on top of the float.
     expected_cash: round2(openingFloat + cashIn - changeOut),
   });
 });
@@ -607,8 +793,9 @@ managerRouter.post('/shifts/close', tillIpGuard, requireAuth, async (req, res) =
     [req.session.cashierId, s.clock_in]
   );
 
-  const expected =
-    Number(s.opening_float) + Number(takings[0].cash_in) - Number(takings[0].change_out);
+  const expected = round2(
+    Number(s.opening_float) + Number(takings[0].cash_in) - Number(takings[0].change_out)
+  );
 
   const { rows } = await pool.query(
     `UPDATE shifts
@@ -620,7 +807,7 @@ managerRouter.post('/shifts/close', tillIpGuard, requireAuth, async (req, res) =
      WHERE id = $4
      RETURNING id, terminal_id, opening_float, counted_cash, expected_cash,
                (counted_cash - expected_cash) AS variance, clock_in, clock_out`,
-    [Number(counted_cash), round2(expected), notes?.trim() || null, s.id]
+    [round2(Number(counted_cash)), expected, notes?.trim() || null, s.id]
   );
 
   await revokeAllForCashier(req.session.cashierId);
@@ -656,8 +843,8 @@ managerRouter.get('/shifts/reconciliation', ...managerOnly, async (req, res) => 
   );
 
   // Shifts that ended without a count -- usually a clock-out-all after a
-  // crash. Worth surfacing, because an uncounted shift is a gap in the
-  // record rather than a balanced one.
+  // crash. An uncounted shift is a gap in the record rather than a balanced
+  // one, so it shouldn't quietly disappear from the review.
   const { rows: uncounted } = await pool.query(
     `SELECT s.id, s.terminal_id, s.clock_in, s.clock_out, c.name AS cashier_name
      FROM shifts s
@@ -682,9 +869,9 @@ managerRouter.get('/shifts/reconciliation', ...managerOnly, async (req, res) => 
       balanced: variances.filter((v) => Math.abs(v) <= 0.01).length,
       short_count: shortfalls.length,
       over_count: surpluses.length,
-      total_shortfall: shortfalls.reduce((a, b) => a + b, 0),
-      total_surplus: surpluses.reduce((a, b) => a + b, 0),
-      net: variances.reduce((a, b) => a + b, 0),
+      total_shortfall: round2(shortfalls.reduce((a, b) => a + b, 0)),
+      total_surplus: round2(surpluses.reduce((a, b) => a + b, 0)),
+      net: round2(variances.reduce((a, b) => a + b, 0)),
       uncounted_count: uncounted.length,
     },
   });
@@ -696,8 +883,8 @@ managerRouter.get('/shifts/reconciliation', ...managerOnly, async (req, res) => 
 
 managerRouter.get('/sales/history', ...managerOnly, async (req, res) => {
   const { rows } = await pool.query(`
-    SELECT s.id, s.terminal_id, s.total, s.cash_amount, s.mpesa_amount,
-           s.change_given, s.mpesa_ref, s.created_at,
+    SELECT s.id, s.terminal_id, s.payment_method, s.total, s.mpesa_ref,
+           s.cash_amount, s.mpesa_amount, s.change_given, s.created_at,
            c.name AS cashier_name
     FROM sales s
     LEFT JOIN cashiers c ON c.id = s.cashier_id
@@ -770,10 +957,15 @@ managerRouter.post('/drawer/pin', ...managerOnly, async (req, res) => {
     [terminal_id, pinHash, req.session.cashierId]
   );
 
+  // Setting a new PIN clears any lockout, so a manager fixing a forgotten
+  // PIN doesn't leave the till still locked out.
   pinAttempts.delete(terminal_id);
 
   res.status(201).json(rows[0]);
 });
+
+// DELETE /api/manager/drawer/pin/:terminalId
+// Ends drawer access for that till until a new PIN is set.
 managerRouter.delete('/drawer/pin/:terminalId', ...managerOnly, async (req, res) => {
   const { rows } = await pool.query(
     `UPDATE drawer_pins SET cleared_at = now()
@@ -898,6 +1090,7 @@ managerRouter.get('/products/categories', ...managerOnly, async (req, res) => {
 });
 
 // POST /api/manager/products
+// body: { sku, barcode, name, category, price, cost_price?, stock_qty?, reorder_level? }
 managerRouter.post('/products', ...managerOnly, async (req, res) => {
   const { sku, barcode, name, category, price, cost_price, stock_qty, reorder_level } = req.body;
 
