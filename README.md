@@ -1,4 +1,8 @@
 ```bash
+Get-Content C:\nexus-pos\packages\shared\src\index.js
+```
+
+```bash
 psql -U postgres -d nexus_pos -c "ALTER TABLE sales ADD COLUMN IF NOT EXISTS cash_amount NUMERIC(12,2) NOT NULL DEFAULT 0, ADD COLUMN IF NOT EXISTS mpesa_amount NUMERIC(12,2) NOT NULL DEFAULT 0;"
 
 psql -U postgres -d nexus_pos -c "UPDATE sales SET cash_amount = total WHERE payment_method = 'cash' AND cash_amount = 0; UPDATE sales SET mpesa_amount = total WHERE payment_method <> 'cash' AND mpesa_amount = 0;"
