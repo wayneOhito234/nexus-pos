@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useState } from 'react';
-import { calcTotals, PAYMENT_METHODS, SOCKET_EVENTS } from '@nexus-pos/shared';
+import { calcTotals, SOCKET_EVENTS } from '@nexus-pos/shared';
 import { TopBar } from './components/TopBar.jsx';
 import { SearchBar } from './components/SearchBar.jsx';
 import { CategoryTabs } from './components/CategoryTabs.jsx';
 import { ProductGrid } from './components/ProductGrid.jsx';
 import { ProductGridSkeleton } from './components/ProductGridSkeleton.jsx';
 import { Cart } from './components/Cart.jsx';
+import { PaymentScreen } from './components/PaymentScreen.jsx';
 import { Receipt } from './components/Receipt.jsx';
 import { DrawerPinGate } from './components/DrawerPinGate.jsx';
 import { ShiftClose } from './components/ShiftClose.jsx';
@@ -43,6 +44,7 @@ export default function App() {
   const [cart, setCart] = useState([]);
   const [checkingOut, setCheckingOut] = useState(false);
   const [paymentStatus, setPaymentStatus] = useState(null);
+  const [showPayment, setShowPayment] = useState(false);
   const [receipt, setReceipt] = useState(null);
 
   const [showNoSalePin, setShowNoSalePin] = useState(false);
@@ -137,6 +139,11 @@ export default function App() {
     };
   }, [socketReady]);
 
+  // M-Pesa and split both need a live round trip through Safaricom, so
+  // neither can work offline. If the connection drops while the payment
+  // screen is open there's nothing to fall back to automatically -- the
+  // screen itself disables those modes and the cashier picks cash.
+
   // Greet the customer once a cashier is on duty and the cart is empty.
   useEffect(() => {
     if (cashier && cart.length === 0) {
@@ -218,7 +225,7 @@ export default function App() {
     });
   }
 
-  function buildReceipt(sale, paymentMethod, extra = {}) {
+  function buildReceipt(sale, methodLabel, extra = {}) {
     return {
       saleId: sale.id,
       localRef: sale.local_ref,
@@ -233,7 +240,7 @@ export default function App() {
       subtotal: sale.subtotal ?? subtotal,
       vat: sale.vat ?? vat,
       total: sale.total ?? total,
-      paymentMethod,
+      paymentMethod: methodLabel,
       timestamp: new Date(),
       ...extra,
     };
@@ -244,80 +251,97 @@ export default function App() {
   //
   // The drawer opens whenever cash physically moves, and only then:
   //
-  //   Cash, any amount   -> opens, because the notes go in
-  //   M-Pesa, exact      -> stays shut, nothing physical moves
-  //   M-Pesa, overpaid   -> opens, change comes out
+  //   Cash, any amount        -> opens, because the notes go in
+  //   M-Pesa, exact            -> stays shut, nothing physical moves
+  //   M-Pesa, overpaid          -> opens, change comes out
+  //   Split, cash + M-Pesa      -> opens, because the cash portion goes in
   //
-  // The PIN gate handles verification, logging and the kick, so a sale is
-  // only posted once the drawer has actually been authorised and opened.
+  // For any leg that includes M-Pesa, the STK push is sent and confirmed
+  // *before* anything else happens -- no drawer prompt, no sale recorded --
+  // so a declined or timed-out push never leaves cash taken (or a drawer
+  // opened) against a sale that doesn't exist. The PIN gate handles
+  // verification, logging and the kick, so a sale is only posted once the
+  // drawer has actually been authorised and opened.
   // ============================================================
 
-  function handleCheckoutCash(amountReceived) {
-    const received = Number(amountReceived);
-    const change = received - total;
-
-    window.nexusVfd?.checkout(total, 'CASH').catch(() => {});
-
-    setPendingSale({
-      method: PAYMENT_METHODS.CASH,
-      amountReceived: received,
-      change: change > 0.001 ? change : 0,
-    });
-    setShowSaleDrawerPin(true);
+  function handleRequestPayment() {
+    setPaymentStatus(null);
+    setShowPayment(true);
   }
 
-  async function handleCheckoutMpesa(phone) {
+  function handlePaymentCancel() {
+    setShowPayment(false);
+    setPaymentStatus(null);
+    setCheckingOut(false);
+  }
+
+  async function handleTakePayment({ cashAmount, mpesaAmount, phone }) {
     setCheckingOut(true);
-    setPaymentStatus('Sending payment request...');
-    window.nexusVfd?.checkout(total, 'M-PESA').catch(() => {});
+    setPaymentStatus(null);
+
+    let mpesaRef = null;
+    let mpesaPaid = 0;
 
     try {
-      const { checkoutRequestId } = await initiateStkPush({
-        phone,
-        amount: total,
-        terminal_id: getTerminalId(),
-      });
+      if (mpesaAmount > 0) {
+        window.nexusVfd
+          ?.checkout(total, cashAmount > 0 ? 'SPLIT' : 'M-PESA')
+          .catch(() => {});
+        setPaymentStatus('Sending payment request...');
 
-      setPaymentStatus(
-        `Waiting for the customer to approve on their phone... (ID: ${checkoutRequestId})`
-      );
+        const { checkoutRequestId } = await initiateStkPush({
+          phone,
+          amount: mpesaAmount,
+          terminal_id: getTerminalId(),
+        });
 
-      const finalStatus = await pollPaymentStatus(checkoutRequestId);
-
-      if (finalStatus.status !== 'confirmed') {
         setPaymentStatus(
-          `Payment ${finalStatus.status}: ${finalStatus.resultDesc || 'not completed'}`
+          `Waiting for the customer to approve on their phone... (ID: ${checkoutRequestId})`
         );
-        addToast(`Payment ${finalStatus.status}`, 'error');
-        setCheckingOut(false);
-        return;
+
+        const finalStatus = await pollPaymentStatus(checkoutRequestId);
+
+        if (finalStatus.status !== 'confirmed') {
+          setPaymentStatus(
+            `Payment ${finalStatus.status}: ${finalStatus.resultDesc || 'not completed'}`
+          );
+          addToast(`Payment ${finalStatus.status}`, 'error');
+          setCheckingOut(false);
+          // Nothing was recorded and no drawer was opened, so the cashier
+          // can just try again or switch method from the same screen.
+          return;
+        }
+
+        mpesaRef = finalStatus.mpesaRef;
+        mpesaPaid = Number(finalStatus.amountPaid ?? mpesaAmount);
+      } else {
+        window.nexusVfd?.checkout(total, 'CASH').catch(() => {});
       }
 
-      // Safaricom's callback reports what was actually paid, so an
-      // overpayment is detected without anyone typing a figure.
-      const paid = Number(finalStatus.amountPaid ?? total);
-      const change = paid - total;
-
       setPaymentStatus(null);
-      setCheckingOut(false);
 
-      if (change > 0.001) {
+      // Whatever cash physically moves -- received up front, or change owed
+      // back once the M-Pesa leg is confirmed -- has to go through the
+      // drawer PIN gate before the sale is recorded. A pure, exact M-Pesa
+      // sale never touches the drawer at all.
+      const tendered = cashAmount + mpesaPaid;
+      const change = tendered - total;
+      const cashMoves = cashAmount > 0 || change > 0.001;
+
+      if (cashMoves) {
+        setCheckingOut(false);
+        setShowPayment(false);
         setPendingSale({
-          method: PAYMENT_METHODS.MPESA,
-          mpesaRef: finalStatus.mpesaRef,
-          amountReceived: paid,
-          change,
+          cashAmount,
+          mpesaAmount: mpesaPaid,
+          mpesaRef,
+          change: change > 0.001 ? change : 0,
         });
         setShowSaleDrawerPin(true);
         return;
       }
 
-      // Paid exactly, so nothing leaves the drawer and it stays shut.
-      await completeSale({
-        method: PAYMENT_METHODS.MPESA,
-        mpesaRef: finalStatus.mpesaRef,
-        amountReceived: paid,
-      });
+      await completeSale({ cashAmount, mpesaAmount: mpesaPaid, mpesaRef });
     } catch (err) {
       setPaymentStatus(`Payment failed: ${err.message}`);
       addToast(`Payment failed: ${err.message}`, 'error');
@@ -335,10 +359,10 @@ export default function App() {
   function handleSaleDrawerCancelled() {
     setShowSaleDrawerPin(false);
 
-    // An M-Pesa payment has already gone through by this point, so
+    // Any M-Pesa portion has already gone through by this point, so
     // abandoning here leaves money taken with no sale recorded. Say so
     // plainly rather than letting it pass quietly.
-    if (pendingSale?.method === PAYMENT_METHODS.MPESA) {
+    if (pendingSale?.mpesaAmount > 0) {
       addToast(
         'Payment was received but the sale was not completed. Open the drawer to finish it.',
         'error'
@@ -348,26 +372,32 @@ export default function App() {
     setPendingSale(null);
   }
 
-  async function completeSale({ method, amountReceived, mpesaRef }) {
+  async function completeSale({ cashAmount, mpesaAmount, mpesaRef }) {
     setCheckingOut(true);
     setPaymentStatus(null);
 
     try {
       const sale = await postSale({
         terminal_id: getTerminalId(),
-        payment_method: method,
-        amount_received: amountReceived ?? null,
+        cash_amount: cashAmount || 0,
+        mpesa_amount: mpesaAmount || 0,
         mpesa_ref: mpesaRef ?? null,
         items: cart.map((item) => ({ product_id: item.product.id, qty: item.qty })),
       });
 
-      const label = method === PAYMENT_METHODS.CASH ? 'Cash' : 'M-Pesa';
+      const label =
+        cashAmount > 0 && mpesaAmount > 0
+          ? 'Cash + M-Pesa'
+          : mpesaAmount > 0
+            ? 'M-Pesa'
+            : 'Cash';
 
       setReceipt(
         buildReceipt(sale, label, {
-          amountReceived: sale.amount_received,
+          cashAmount: sale.cash_amount,
+          mpesaAmount: sale.mpesa_amount,
           changeGiven: sale.change_given,
-          mpesaRef,
+          mpesaRef: sale.mpesa_ref ?? mpesaRef,
         })
       );
 
@@ -376,6 +406,7 @@ export default function App() {
         .catch(() => {});
 
       setCart([]);
+      setShowPayment(false);
       addToast(`Sale #${sale.id} complete, ${kes(sale.total)}`, 'success');
     } catch (err) {
       addToast(`Checkout failed: ${err.message}`, 'error');
@@ -455,19 +486,30 @@ export default function App() {
       ? `Change due: ${kes(pendingSale.change)}`
       : 'Open the drawer for this sale';
 
-  const drawerSubtitle =
-    pendingSale?.method === PAYMENT_METHODS.MPESA
-      ? `Paid ${kes(pendingSale.amountReceived)} by M-Pesa against ${kes(total)}`
-      : pendingSale?.change > 0
-        ? `Received ${kes(pendingSale.amountReceived)} against ${kes(total)}`
-        : `Exact payment of ${kes(total)}`;
+  const drawerSubtitle = (() => {
+    if (!pendingSale) return undefined;
+    const { cashAmount, mpesaAmount, change } = pendingSale;
+    if (cashAmount > 0 && mpesaAmount > 0) {
+      return `Split: ${kes(cashAmount)} cash + ${kes(mpesaAmount)} M-Pesa against ${kes(total)}`;
+    }
+    if (mpesaAmount > 0) {
+      return `Paid ${kes(mpesaAmount)} by M-Pesa against ${kes(total)}`;
+    }
+    return change > 0
+      ? `Received ${kes(cashAmount)} against ${kes(total)}`
+      : `Exact payment of ${kes(total)}`;
+  })();
 
-  const drawerReason =
-    pendingSale?.method === PAYMENT_METHODS.MPESA
-      ? 'Change on M-Pesa overpayment'
-      : pendingSale?.change > 0
-        ? 'Cash sale with change'
-        : 'Cash sale, exact';
+  const drawerReason = (() => {
+    if (!pendingSale) return undefined;
+    if (pendingSale.cashAmount > 0 && pendingSale.mpesaAmount > 0) {
+      return 'Split sale, cash portion';
+    }
+    if (pendingSale.mpesaAmount > 0) {
+      return 'Change on M-Pesa overpayment';
+    }
+    return pendingSale.change > 0 ? 'Cash sale with change' : 'Cash sale, exact';
+  })();
 
   return (
     <div className="app">
@@ -495,11 +537,8 @@ export default function App() {
           subtotal={subtotal}
           vat={vat}
           total={total}
-          online={online}
-          onCheckoutCash={handleCheckoutCash}
-          onCheckoutMpesa={handleCheckoutMpesa}
           checkingOut={checkingOut}
-          paymentStatus={paymentStatus}
+          onRequestPayment={handleRequestPayment}
           onRemoveItem={removeCartItem}
           onIncrement={incrementCartItem}
           onDecrement={decrementCartItem}
@@ -507,6 +546,18 @@ export default function App() {
       </div>
 
       <ToastContainer toasts={toasts} onDismiss={removeToast} />
+
+      {showPayment && (
+        <PaymentScreen
+          total={total}
+          vat={vat}
+          online={online}
+          busy={checkingOut}
+          status={paymentStatus}
+          onTake={handleTakePayment}
+          onCancel={handlePaymentCancel}
+        />
+      )}
 
       {receipt && <Receipt receipt={receipt} onClose={() => setReceipt(null)} />}
 
