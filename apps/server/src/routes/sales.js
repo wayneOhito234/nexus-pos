@@ -26,7 +26,7 @@ salesRouter.post('/', tillIpGuard, requireAuth, async (req, res) => {
   try {
     await client.query('BEGIN');
 
-    let subtotal = 0;
+    let grossTotal = 0;
     const lineItems = [];
 
     for (const { product_id, qty } of items) {
@@ -46,12 +46,17 @@ salesRouter.post('/', tillIpGuard, requireAuth, async (req, res) => {
         );
       }
 
-      subtotal += Number(product.price) * qty;
+      grossTotal += Number(product.price) * qty;
       lineItems.push({ product_id, qty, price: product.price });
     }
 
-    const vat = subtotal * VAT_RATE;
-    const total = subtotal + vat;
+    // Shelf prices are VAT-inclusive: the marked price is what the customer
+    // pays, so the total is just the sum of the line prices. The 16% VAT is the
+    // portion already contained within that total (extracted here for the
+    // receipt), not added on top. subtotal is the net, ex-VAT figure.
+    const total = Math.round(grossTotal * 100) / 100;
+    const vat = Math.round((total - total / (1 + VAT_RATE)) * 100) / 100;
+    const subtotal = Math.round((total - vat) * 100) / 100;
 
     let changeGiven = null;
     if (payment_method === 'cash' && amount_received !== undefined) {

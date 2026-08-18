@@ -766,6 +766,33 @@ button.ghost:hover { color: var(--text); border-color: var(--accent); }
 
   body, .shell, .shell__main { background: #fff !important; color: #000 !important; }
 
+  /* The on-screen layout is a two-column grid (216px sidebar + 1fr main).
+     When the sidebar is hidden for printing it leaves the grid entirely, so
+     the main content would land in the leftover 216px column and print as a
+     narrow strip down the left of the page. Switch the shell to a plain block
+     so the document spans the full page width, and let it grow past one screen
+     height so long invoices / balance sheets aren't clipped to a single page. */
+  html, body { height: auto !important; overflow: visible !important; }
+  .shell {
+    display: block !important;
+    height: auto !important;
+    overflow: visible !important;
+  }
+  .shell__main {
+    overflow: visible !important;
+    height: auto !important;
+    min-width: 0 !important;
+    padding: 0 !important;
+  }
+
+  /* Let the document containers use the full printable width. */
+  .inv-detail,
+  .bs {
+    width: 100% !important;
+    max-width: 100% !important;
+    padding: 0 !important;
+  }
+
   /* Invoice document print styles */
   .inv-doc {
     border: none;

@@ -2,6 +2,7 @@
 import { useEffect, useState } from 'react';
 import { Printer, FileText, ArrowLeft } from 'lucide-react';
 import { fetchSalesHistory, fetchReceipt } from '../api/client.js';
+import { VAT_RATE } from '@nexus-pos/shared';
 
 const kes = (v) =>
   `KES ${Number(v || 0).toLocaleString('en-KE', { minimumFractionDigits: 2 })}`;
@@ -41,7 +42,12 @@ function InvoiceDetail({ sale, onBack }) {
     window.print();
   }
 
-  const subtotal = sale.items.reduce((s, it) => s + Number(it.line_total), 0);
+  // Prices are VAT-inclusive, so sale.total already contains the 16% VAT.
+  // Break it out for the invoice: `vat` is the portion embedded in the total,
+  // and `subtotal` is the net (ex-VAT) amount. They reconcile to sale.total.
+  const gross = Number(sale.total);
+  const vat = Math.round((gross - gross / (1 + VAT_RATE)) * 100) / 100;
+  const subtotal = Math.round((gross - vat) * 100) / 100;
 
   return (
     <div className="inv-detail">
@@ -126,6 +132,10 @@ function InvoiceDetail({ sale, onBack }) {
           <div className="inv-doc__totals-row">
             <span>Subtotal</span>
             <span>{kes(subtotal)}</span>
+          </div>
+          <div className="inv-doc__totals-row">
+            <span>VAT ({Math.round(VAT_RATE * 100)}%)</span>
+            <span>{kes(vat)}</span>
           </div>
           <div className="inv-doc__totals-row inv-doc__totals-row--total">
             <span>Total</span>
