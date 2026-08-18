@@ -2397,3 +2397,23 @@ input:focus-visible {
     display: none !important;
   }
 }
+.manager-pin-sub {
+  margin: -4px 0 4px;
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+  text-align: center;
+  line-height: 1.4;
+}
+.cart__offline-note {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  padding: 9px 12px;
+  border-radius: var(--radius-md);
+  background: rgba(251, 191, 36, 0.12);
+  border: 1px solid rgba(251, 191, 36, 0.28);
+  color: #fbbf24;
+  font-size: 0.78rem;
+  line-height: 1.4;
+}

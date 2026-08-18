@@ -7,15 +7,15 @@ import { checkLowStockAndAlert } from '../whatsapp.js';
 
 export const salesRouter = Router();
 
-// Selling needs a till machine and a signed-in cashier. The IP guard is
-// what makes "the manager cannot sell" true at the server rather than by
-// hiding a button.
+// Selling needs a till machine and a signed-in cashier. The IP guard is what
+// makes "the manager cannot sell" true at the server rather than by hiding a
+// button.
 salesRouter.post('/', tillIpGuard, requireAuth, async (req, res) => {
   const { terminal_id, payment_method, mpesa_ref, items, amount_received } = req.body;
 
-  // Identity comes from the verified session, never the request body. A
-  // till could otherwise attribute a sale to any cashier it named, which
-  // would make every report and shift reconciliation meaningless.
+  // Identity comes from the verified session, never the request body. A till
+  // could otherwise attribute a sale to any cashier it named, which would
+  // make every report and shift reconciliation meaningless.
   const cashierId = req.session.cashierId;
 
   if (!terminal_id || !payment_method || !Array.isArray(items) || items.length === 0) {
@@ -51,19 +51,35 @@ salesRouter.post('/', tillIpGuard, requireAuth, async (req, res) => {
     }
 
     // Shelf prices are VAT-inclusive: the marked price is what the customer
-    // pays, so the total is just the sum of the line prices. The 16% VAT is the
-    // portion already contained within that total (extracted here for the
+    // pays, so the total is just the sum of the line prices. The 16% VAT is
+    // the portion already contained within that total (extracted here for the
     // receipt), not added on top. subtotal is the net, ex-VAT figure.
     const total = Math.round(grossTotal * 100) / 100;
     const vat = Math.round((total - total / (1 + VAT_RATE)) * 100) / 100;
     const subtotal = Math.round((total - vat) * 100) / 100;
 
+    // Change can be due on either payment type, and the difference matters
+    // for reconciliation.
+    //
+    // Cash change comes out of money just handed in, so the drawer nets up by
+    // the sale total. M-Pesa change comes out of the drawer while the payment
+    // lands in the M-Pesa account -- so the physical drawer goes DOWN by the
+    // change amount. Without recording it, every overpayment would make the
+    // till look short at cash-up.
     let changeGiven = null;
-    if (payment_method === 'cash' && amount_received !== undefined) {
-      if (Number(amount_received) < total) {
-        throw Object.assign(new Error('Amount received is less than the total due'), { status: 400 });
+
+    if (amount_received !== undefined && amount_received !== null) {
+      const received = Number(amount_received);
+
+      if (payment_method === 'cash' && received < total) {
+        throw Object.assign(
+          new Error('Amount received is less than the total due'),
+          { status: 400 }
+        );
       }
-      changeGiven = Number(amount_received) - total;
+
+      const change = Math.round((received - total) * 100) / 100;
+      changeGiven = change > 0 ? change : 0;
     }
 
     const { rows: saleRows } = await client.query(
@@ -78,7 +94,7 @@ salesRouter.post('/', tillIpGuard, requireAuth, async (req, res) => {
         total,
         payment_method,
         mpesa_ref || null,
-        amount_received || null,
+        amount_received ?? null,
         changeGiven,
       ]
     );
@@ -90,14 +106,14 @@ salesRouter.post('/', tillIpGuard, requireAuth, async (req, res) => {
         [sale.id, item.product_id, item.qty, item.price]
       );
 
-      await client.query(
-        'UPDATE products SET stock_qty = stock_qty - $1 WHERE id = $2',
-        [item.qty, item.product_id]
-      );
+      await client.query('UPDATE products SET stock_qty = stock_qty - $1 WHERE id = $2', [
+        item.qty,
+        item.product_id,
+      ]);
 
       // A sale is a stock movement like any other. Without this row the
-      // ledger would record deliveries and adjustments but silently omit
-      // the largest source of stock leaving the shelf.
+      // ledger would record deliveries and adjustments but silently omit the
+      // largest source of stock leaving the shelf.
       await client.query(
         `INSERT INTO stock_movements
            (product_id, movement_type, qty_change, location, reason, reference_id, staff_id)

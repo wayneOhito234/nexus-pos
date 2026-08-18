@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { calcTotals, PAYMENT_METHODS, SOCKET_EVENTS } from '@nexus-pos/shared';
 import { TopBar } from './components/TopBar.jsx';
 import { SearchBar } from './components/SearchBar.jsx';
@@ -8,7 +8,6 @@ import { ProductGridSkeleton } from './components/ProductGridSkeleton.jsx';
 import { Cart } from './components/Cart.jsx';
 import { Receipt } from './components/Receipt.jsx';
 import { DrawerPinGate } from './components/DrawerPinGate.jsx';
-import { ChangeConfirm } from './components/ChangeConfirm.jsx';
 import { ShiftClose } from './components/ShiftClose.jsx';
 import { Login } from './components/Login.jsx';
 import { TerminalSetup } from './components/TerminalSetup.jsx';
@@ -26,9 +25,9 @@ import {
 } from './api/client.js';
 import { connectSocket, getSocket } from './socket.js';
 import { loadTerminalId, getTerminalId } from './terminalId.js';
-import { vfd } from './vfd-hook.js';
 
 const BRANCH_NAME = 'Zummart Supermarket';
+const kes = (v) => `KES ${Number(v || 0).toFixed(2)}`;
 
 export default function App() {
   const [bootState, setBootState] = useState('checking'); // checking | needs-setup | ready
@@ -46,10 +45,9 @@ export default function App() {
   const [paymentStatus, setPaymentStatus] = useState(null);
   const [receipt, setReceipt] = useState(null);
 
-  const [showDrawerPin, setShowDrawerPin] = useState(false);
-  const [showChangeDrawerPin, setShowChangeDrawerPin] = useState(false);
-  const [showChangeConfirm, setShowChangeConfirm] = useState(false);
-  const [pendingCashAmount, setPendingCashAmount] = useState(null);
+  const [showNoSalePin, setShowNoSalePin] = useState(false);
+  const [showSaleDrawerPin, setShowSaleDrawerPin] = useState(false);
+  const [pendingSale, setPendingSale] = useState(null);
   const [showShiftClose, setShowShiftClose] = useState(false);
 
   const { toasts, addToast, removeToast } = useToasts();
@@ -116,8 +114,8 @@ export default function App() {
     const handleDisconnect = () => setOnline(false);
 
     // An archived product arrives here like any other update, so filter it
-    // out -- otherwise a product the manager just pulled stays sellable
-    // until the till is restarted.
+    // out -- otherwise something the manager just pulled stays sellable
+    // until the till restarts.
     const handleStockUpdated = (updatedProducts) => {
       setProducts((prev) => {
         const byId = new Map(prev.map((p) => [p.id, p]));
@@ -138,6 +136,13 @@ export default function App() {
       socket.off(SOCKET_EVENTS.STOCK_UPDATED, handleStockUpdated);
     };
   }, [socketReady]);
+
+  // Greet the customer once a cashier is on duty and the cart is empty.
+  useEffect(() => {
+    if (cashier && cart.length === 0) {
+      window.nexusVfd?.welcome().catch(() => {});
+    }
+  }, [cashier, cart.length]);
 
   const categories = useMemo(
     () => Array.from(new Set(products.map((p) => p.category))).sort(),
@@ -162,39 +167,28 @@ export default function App() {
     [cart]
   );
 
-  // Customer display (VFD) --------------------------------------------------
-  // lastScanRef remembers the product just scanned so the display can show its
-  // name; saleCompletingRef keeps clearing the cart after a sale from stomping
-  // the "thank you / change" screen with the welcome message.
-  const lastScanRef = useRef(null);
-  const saleCompletingRef = useRef(false);
-
-  // Keep the VFD in sync with the cart: empty cart -> welcome, otherwise show
-  // the latest scanned item and the running total.
-  useEffect(() => {
-    if (saleCompletingRef.current) return; // leave the thank-you/change screen up
-    if (cart.length === 0) {
-      vfd.welcome();
-      return;
-    }
-    const product = lastScanRef.current ?? cart[cart.length - 1].product;
-    vfd.itemAdded(product.name, product.price, total);
-  }, [cart, total]);
-
   function addToCart(product) {
-    // A new scan re-arms the display and remembers this product for the VFD.
-    saleCompletingRef.current = false;
-    lastScanRef.current = product;
     setCart((prev) => {
       const existing = prev.find((item) => item.product.id === product.id);
       const currentQty = existing?.qty || 0;
       if (currentQty >= product.stock_qty) return prev;
-      if (existing) {
-        return prev.map((item) =>
-          item.product.id === product.id ? { ...item, qty: item.qty + 1 } : item
-        );
-      }
-      return [...prev, { product, qty: 1 }];
+
+      const next = existing
+        ? prev.map((item) =>
+            item.product.id === product.id ? { ...item, qty: item.qty + 1 } : item
+          )
+        : [...prev, { product, qty: 1 }];
+
+      // Show the customer what was just scanned, and the running total.
+      const runningTotal = next.reduce(
+        (sum, i) => sum + Number(i.product.price) * i.qty,
+        0
+      );
+      window.nexusVfd
+        ?.itemAdded(product.name, Number(product.price), runningTotal)
+        .catch(() => {});
+
+      return next;
     });
   }
 
@@ -236,60 +230,47 @@ export default function App() {
         price: item.product.price,
         lineTotal: item.product.price * item.qty,
       })),
-      subtotal,
-      vat,
-      total,
+      subtotal: sale.subtotal ?? subtotal,
+      vat: sale.vat ?? vat,
+      total: sale.total ?? total,
       paymentMethod,
       timestamp: new Date(),
       ...extra,
     };
   }
 
-  // cashier_id is no longer sent. The server reads it from the verified
-  // session, so anything the client claimed here would be ignored.
-  async function handleCheckoutCash(amountReceived) {
-    setCheckingOut(true);
-    setPaymentStatus(null);
-    try {
-      const payload = {
-        terminal_id: getTerminalId(),
-        payment_method: PAYMENT_METHODS.CASH,
-        amount_received: amountReceived,
-        items: cart.map((item) => ({ product_id: item.product.id, qty: item.qty })),
-      };
+  // ============================================================
+  // Checkout
+  //
+  // The drawer opens whenever cash physically moves, and only then:
+  //
+  //   Cash, any amount   -> opens, because the notes go in
+  //   M-Pesa, exact      -> stays shut, nothing physical moves
+  //   M-Pesa, overpaid   -> opens, change comes out
+  //
+  // The PIN gate handles verification, logging and the kick, so a sale is
+  // only posted once the drawer has actually been authorised and opened.
+  // ============================================================
 
-      const sale = await postSale(payload);
+  function handleCheckoutCash(amountReceived) {
+    const received = Number(amountReceived);
+    const change = received - total;
 
-      // Cash sale means cash goes in the drawer, so open it. No PIN here --
-      // the completed sale is the authorisation, and requiring one on every
-      // transaction would slow the queue for no security gain.
-      const config = await window.nexusConfig?.read();
-      window.nexusDrawer?.open({
-        shareName: config?.drawerShareName,
-        pin: config?.drawerPin,
-      }).catch(() => {});
+    window.nexusVfd?.checkout(total, 'CASH').catch(() => {});
 
-      setReceipt(
-        buildReceipt(sale, 'Cash', {
-          amountReceived: sale.amount_received,
-          changeGiven: sale.change_given,
-        })
-      );
-
-      saleCompletingRef.current = true;
-      vfd.saleComplete(sale.change_given ?? 0, 'cash');
-      setCart([]);
-      addToast(`Sale #${sale.id} complete, KES ${Number(sale.total).toFixed(2)}`, 'success');
-    } catch (err) {
-      addToast(`Checkout failed: ${err.message}`, 'error');
-    } finally {
-      setCheckingOut(false);
-    }
+    setPendingSale({
+      method: PAYMENT_METHODS.CASH,
+      amountReceived: received,
+      change: change > 0.001 ? change : 0,
+    });
+    setShowSaleDrawerPin(true);
   }
 
   async function handleCheckoutMpesa(phone) {
     setCheckingOut(true);
     setPaymentStatus('Sending payment request...');
+    window.nexusVfd?.checkout(total, 'M-PESA').catch(() => {});
+
     try {
       const { checkoutRequestId } = await initiateStkPush({
         phone,
@@ -312,24 +293,92 @@ export default function App() {
         return;
       }
 
-      const payload = {
-        terminal_id: getTerminalId(),
-        payment_method: PAYMENT_METHODS.MPESA,
-        mpesa_ref: finalStatus.mpesaRef,
-        items: cart.map((item) => ({ product_id: item.product.id, qty: item.qty })),
-      };
+      // Safaricom's callback reports what was actually paid, so an
+      // overpayment is detected without anyone typing a figure.
+      const paid = Number(finalStatus.amountPaid ?? total);
+      const change = paid - total;
 
-      const sale = await postSale(payload);
-
-      setReceipt(buildReceipt(sale, 'M-Pesa', { mpesaRef: finalStatus.mpesaRef }));
-      saleCompletingRef.current = true;
-      vfd.saleComplete(0, 'mpesa');
-      setCart([]);
       setPaymentStatus(null);
-      addToast(`Sale #${sale.id} complete, KES ${Number(sale.total).toFixed(2)}`, 'success');
+      setCheckingOut(false);
+
+      if (change > 0.001) {
+        setPendingSale({
+          method: PAYMENT_METHODS.MPESA,
+          mpesaRef: finalStatus.mpesaRef,
+          amountReceived: paid,
+          change,
+        });
+        setShowSaleDrawerPin(true);
+        return;
+      }
+
+      // Paid exactly, so nothing leaves the drawer and it stays shut.
+      await completeSale({
+        method: PAYMENT_METHODS.MPESA,
+        mpesaRef: finalStatus.mpesaRef,
+        amountReceived: paid,
+      });
     } catch (err) {
       setPaymentStatus(`Payment failed: ${err.message}`);
       addToast(`Payment failed: ${err.message}`, 'error');
+      setCheckingOut(false);
+    }
+  }
+
+  async function handleSaleDrawerUnlocked() {
+    setShowSaleDrawerPin(false);
+    const sale = pendingSale;
+    setPendingSale(null);
+    if (sale) await completeSale(sale);
+  }
+
+  function handleSaleDrawerCancelled() {
+    setShowSaleDrawerPin(false);
+
+    // An M-Pesa payment has already gone through by this point, so
+    // abandoning here leaves money taken with no sale recorded. Say so
+    // plainly rather than letting it pass quietly.
+    if (pendingSale?.method === PAYMENT_METHODS.MPESA) {
+      addToast(
+        'Payment was received but the sale was not completed. Open the drawer to finish it.',
+        'error'
+      );
+    }
+
+    setPendingSale(null);
+  }
+
+  async function completeSale({ method, amountReceived, mpesaRef }) {
+    setCheckingOut(true);
+    setPaymentStatus(null);
+
+    try {
+      const sale = await postSale({
+        terminal_id: getTerminalId(),
+        payment_method: method,
+        amount_received: amountReceived ?? null,
+        mpesa_ref: mpesaRef ?? null,
+        items: cart.map((item) => ({ product_id: item.product.id, qty: item.qty })),
+      });
+
+      const label = method === PAYMENT_METHODS.CASH ? 'Cash' : 'M-Pesa';
+
+      setReceipt(
+        buildReceipt(sale, label, {
+          amountReceived: sale.amount_received,
+          changeGiven: sale.change_given,
+          mpesaRef,
+        })
+      );
+
+      window.nexusVfd
+        ?.saleComplete(Number(sale.change_given || 0), label.toUpperCase())
+        .catch(() => {});
+
+      setCart([]);
+      addToast(`Sale #${sale.id} complete, ${kes(sale.total)}`, 'success');
+    } catch (err) {
+      addToast(`Checkout failed: ${err.message}`, 'error');
     } finally {
       setCheckingOut(false);
     }
@@ -344,48 +393,23 @@ export default function App() {
     return { status: 'pending' };
   }
 
-  // The gate verifies the PIN and records the drawer event server-side, so
-  // by the time these run the opening is already logged.
-  function handleDrawerOpened() {
+  // ---- No sale ----
+
+  function handleNoSaleOpened() {
     addToast('Drawer opened (No Sale) \u2014 logged.', 'info');
-    setShowDrawerPin(false);
+    setShowNoSalePin(false);
   }
 
-  function handleRequestChangeFlow(amountReceived) {
-    setPendingCashAmount(amountReceived);
-    setShowChangeDrawerPin(true);
-  }
+  // ---- Session ----
 
-  function handleChangeDrawerUnlocked() {
-    setShowChangeDrawerPin(false);
-    setShowChangeConfirm(true);
-  }
-
-  function handleChangeCancelled() {
-    setShowChangeDrawerPin(false);
-    setShowChangeConfirm(false);
-    setPendingCashAmount(null);
-  }
-
-  async function handleChangeAcknowledged() {
-    const amount = pendingCashAmount;
-    setShowChangeConfirm(false);
-    setPendingCashAmount(null);
-    await handleCheckoutCash(amount);
-  }
-
-  // The token comes back from login alongside the cashier's identity, but it
-  // only does anything once it's handed to client.js -- that's the module
-  // that attaches it to outgoing requests. Skip this and every
-  // authenticated call goes out with no Authorization header at all.
   function handleLoggedIn(newCashier) {
     setAuthToken(newCashier.token);
     setCashier(newCashier);
     window.nexusSession?.setCashierId(newCashier.id);
   }
 
-  // Logging out now goes through the cash count, so a shift can't end
-  // without the drawer being reconciled.
+  // Logging out goes through the cash count, so a shift can't end without
+  // the drawer being reconciled.
   function handleLogout() {
     if (cart.length > 0) {
       addToast('Finish or clear the current sale first.', 'error');
@@ -398,6 +422,7 @@ export default function App() {
     setShowShiftClose(false);
     clearAuthToken();
     window.nexusSession?.clearCashierId();
+    window.nexusVfd?.clear().catch(() => {});
     setCashier(null);
 
     const variance = Number(result.variance);
@@ -405,6 +430,8 @@ export default function App() {
       console.warn(`Shift closed with a variance of ${variance.toFixed(2)}`);
     }
   }
+
+  // ---- Render ----
 
   if (bootState === 'checking') {
     return (
@@ -423,6 +450,25 @@ export default function App() {
     return <Login onLoggedIn={handleLoggedIn} />;
   }
 
+  const drawerTitle =
+    pendingSale?.change > 0
+      ? `Change due: ${kes(pendingSale.change)}`
+      : 'Open the drawer for this sale';
+
+  const drawerSubtitle =
+    pendingSale?.method === PAYMENT_METHODS.MPESA
+      ? `Paid ${kes(pendingSale.amountReceived)} by M-Pesa against ${kes(total)}`
+      : pendingSale?.change > 0
+        ? `Received ${kes(pendingSale.amountReceived)} against ${kes(total)}`
+        : `Exact payment of ${kes(total)}`;
+
+  const drawerReason =
+    pendingSale?.method === PAYMENT_METHODS.MPESA
+      ? 'Change on M-Pesa overpayment'
+      : pendingSale?.change > 0
+        ? 'Cash sale with change'
+        : 'Cash sale, exact';
+
   return (
     <div className="app">
       <TopBar
@@ -430,7 +476,7 @@ export default function App() {
         cashierName={cashier.name}
         online={online}
         onLogout={handleLogout}
-        onNoSaleClick={() => setShowDrawerPin(true)}
+        onNoSaleClick={() => setShowNoSalePin(true)}
       />
 
       <div className="app__toolbar">
@@ -449,9 +495,9 @@ export default function App() {
           subtotal={subtotal}
           vat={vat}
           total={total}
+          online={online}
           onCheckoutCash={handleCheckoutCash}
           onCheckoutMpesa={handleCheckoutMpesa}
-          onRequestChangeFlow={handleRequestChangeFlow}
           checkingOut={checkingOut}
           paymentStatus={paymentStatus}
           onRemoveItem={removeCartItem}
@@ -464,29 +510,22 @@ export default function App() {
 
       {receipt && <Receipt receipt={receipt} onClose={() => setReceipt(null)} />}
 
-      {showDrawerPin && (
+      {showSaleDrawerPin && (
         <DrawerPinGate
+          title={drawerTitle}
+          subtitle={drawerSubtitle}
+          reason={drawerReason}
+          onUnlock={handleSaleDrawerUnlocked}
+          onCancel={handleSaleDrawerCancelled}
+        />
+      )}
+
+      {showNoSalePin && (
+        <DrawerPinGate
+          title="Open the drawer (No Sale)"
           reason="No sale"
-          onUnlock={handleDrawerOpened}
-          onCancel={() => setShowDrawerPin(false)}
-        />
-      )}
-
-      {showChangeDrawerPin && (
-        <DrawerPinGate
-          title="Enter PIN to open drawer"
-          reason="Change given"
-          onUnlock={handleChangeDrawerUnlocked}
-          onCancel={handleChangeCancelled}
-        />
-      )}
-
-      {showChangeConfirm && (
-        <ChangeConfirm
-          amountReceived={pendingCashAmount}
-          total={total}
-          onAcknowledge={handleChangeAcknowledged}
-          onCancel={handleChangeCancelled}
+          onUnlock={handleNoSaleOpened}
+          onCancel={() => setShowNoSalePin(false)}
         />
       )}
 

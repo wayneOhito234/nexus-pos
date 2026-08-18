@@ -14,9 +14,6 @@ function log(msg) {
 
 log('1: requires done');
 
-// ── Change 'COM3' to your actual VFD COM port from Device Manager ─────────────
-const VFD_COM_PORT = 'COM3';
-
 Menu.setApplicationMenu(null);
 log('2: menu set to null');
 
@@ -78,24 +75,26 @@ function createWindow() {
 
 log('3: about to register ipcMain handlers');
 
-// ── Original IPC handlers ─────────────────────────────────────────────────────
-ipcMain.handle('cache:get-products',    ()                            => getCachedProducts());
-ipcMain.handle('cache:set-products',    (_event, products)            => setCachedProducts(products));
-ipcMain.handle('sales:save-local',      (_event, sale)                => saveSaleLocally(sale));
-ipcMain.handle('sales:get-pending',     ()                            => getPendingSales());
+// ── Cache and local sales ─────────────────────────────────────────────────────
+ipcMain.handle('cache:get-products',    ()                              => getCachedProducts());
+ipcMain.handle('cache:set-products',    (_event, products)              => setCachedProducts(products));
+ipcMain.handle('sales:save-local',      (_event, sale)                  => saveSaleLocally(sale));
+ipcMain.handle('sales:get-pending',     ()                              => getPendingSales());
 ipcMain.handle('sales:mark-synced',     (_event, localSaleId, serverId) => markSaleSynced(localSaleId, serverId));
-ipcMain.handle('sales:pending-count',   ()                            => getPendingSyncCount());
-ipcMain.handle('session:set-cashier',   (_event, cashierId)           => { currentCashierId = cashierId; });
-ipcMain.handle('session:clear-cashier', ()                            => { currentCashierId = null; });
-ipcMain.handle('config:read',           ()                            => readConfig());
-ipcMain.handle('config:write',          (_event, config)              => writeConfig(config));
-ipcMain.handle('config:is-configured',  ()                            => isConfigured());
+ipcMain.handle('sales:pending-count',   ()                              => getPendingSyncCount());
 
-// ── VFD IPC handlers ──────────────────────────────────────────────────────────
-ipcMain.handle('vfd:item-added',    (_event, { productName, unitPrice, cartTotal }) => {
+// ── Session and config ────────────────────────────────────────────────────────
+ipcMain.handle('session:set-cashier',   (_event, cashierId)             => { currentCashierId = cashierId; });
+ipcMain.handle('session:clear-cashier', ()                              => { currentCashierId = null; });
+ipcMain.handle('config:read',           ()                              => readConfig());
+ipcMain.handle('config:write',          (_event, config)                => writeConfig(config));
+ipcMain.handle('config:is-configured',  ()                              => isConfigured());
+
+// ── Customer display ──────────────────────────────────────────────────────────
+ipcMain.handle('vfd:item-added', (_event, { productName, unitPrice, cartTotal }) => {
   vfdItemAdded(productName, unitPrice, cartTotal);
 });
-ipcMain.handle('vfd:checkout',      (_event, { total, paymentMethod }) => {
+ipcMain.handle('vfd:checkout', (_event, { total, paymentMethod }) => {
   vfdCheckout(total, paymentMethod);
 });
 ipcMain.handle('vfd:sale-complete', (_event, { changeGiven, paymentMethod }) => {
@@ -104,10 +103,19 @@ ipcMain.handle('vfd:sale-complete', (_event, { changeGiven, paymentMethod }) => 
 ipcMain.handle('vfd:welcome', () => vfdWelcome());
 ipcMain.handle('vfd:clear',   () => vfdClear());
 
-// ── Cash drawer IPC handler ───────────────────────────────────────────────────
+// ── Cash drawer ───────────────────────────────────────────────────────────────
+//
+// The drawer hangs off the printer's DK port, so opening it means sending
+// ESC/POS bytes to the printer rather than talking to the drawer directly.
+// Failures are returned rather than thrown, so the renderer can tell the
+// cashier the drawer did not move without the whole sale falling over.
 ipcMain.handle('drawer:open', async (_event, options) => {
   try {
-    await openDrawer(options);
+    const config = readConfig() || {};
+    await openDrawer({
+      shareName: options?.shareName ?? config.drawerShareName,
+      pin:       options?.pin       ?? config.drawerPin,
+    });
     return { ok: true };
   } catch (err) {
     log(`drawer kick failed: ${err.message}`);
@@ -127,8 +135,12 @@ app.whenReady().then(async () => {
     log(`local database init failed: ${err.message}`);
   }
 
-  // Open VFD display (silently skips if port not available)
-  vfdOpen(VFD_COM_PORT);
+  // The VFD port differs by machine, so it comes from config rather than
+  // being hardcoded. Falls back to COM3, which is the usual default.
+  const config = readConfig() || {};
+  const vfdPort = config.vfdPort || 'COM3';
+  log(`opening customer display on ${vfdPort}`);
+  vfdOpen(vfdPort);
 
   createWindow();
   app.on('activate', () => {

@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Minus, Plus, Trash2, Banknote, Smartphone, ShoppingCart } from 'lucide-react';
+import { Minus, Plus, Trash2, Banknote, Smartphone, ShoppingCart, WifiOff } from 'lucide-react';
 
 const formatKes = (value) =>
   `KES ${Number(value).toLocaleString('en-KE', { minimumFractionDigits: 2 })}`;
@@ -9,12 +9,11 @@ export function Cart({
   subtotal,
   vat,
   total,
+  online,
   onCheckoutCash,
   onCheckoutMpesa,
-  onRequestChangeFlow,
   checkingOut,
   paymentStatus,
-  managerMode,
   onRemoveItem,
   onIncrement,
   onDecrement,
@@ -29,19 +28,26 @@ export function Cart({
     }
   }, [items.length]);
 
+  // M-Pesa needs a live round trip through Safaricom, so it can't work
+  // offline. Fall back to cash rather than letting a cashier start a payment
+  // that will time out.
+  useEffect(() => {
+    if (!online && method === 'mpesa_stk') {
+      setMethod('cash');
+    }
+  }, [online, method]);
+
   const disabled = items.length === 0 || checkingOut;
 
   const receivedNum = Number(amountReceived) || 0;
   const change = receivedNum - total;
   const cashReady = method === 'cash' ? receivedNum >= total : true;
 
+  // Both cash paths go the same way now. Whether the drawer opens is decided
+  // upstream by how the money actually moves, not here.
   function handlePayClick() {
     if (method === 'cash') {
-      if (change > 0.001) {
-        onRequestChangeFlow(receivedNum);
-      } else {
-        onCheckoutCash(receivedNum);
-      }
+      onCheckoutCash(receivedNum);
     } else {
       onCheckoutMpesa(phone);
     }
@@ -53,6 +59,7 @@ export function Cart({
         <ShoppingCart size={18} />
         Current Sale
       </h2>
+
       <div className="cart__items">
         {items.length === 0 && (
           <div className="cart__empty">
@@ -60,6 +67,7 @@ export function Cart({
             <span>Cart is empty</span>
           </div>
         )}
+
         {items.map((item) => (
           <div key={item.product.id} className="cart__line">
             <div className="cart__line-info">
@@ -129,18 +137,27 @@ export function Cart({
         <button
           className={`payment-method-btn ${method === 'mpesa_stk' ? 'payment-method-btn--active' : ''}`}
           onClick={() => setMethod('mpesa_stk')}
-          disabled={checkingOut}
+          disabled={checkingOut || !online}
+          title={!online ? 'M-Pesa needs an internet connection' : undefined}
         >
           <Smartphone size={15} />
           M-Pesa STK Push
         </button>
       </div>
 
+      {!online && (
+        <p className="cart__offline-note">
+          <WifiOff size={13} />
+          No connection to the server. Cash only until it is back.
+        </p>
+      )}
+
       {method === 'cash' && (
         <div className="cash-tender">
           <input
             className="cash-tender__input"
             type="number"
+            inputMode="decimal"
             placeholder="Amount received (KES)"
             value={amountReceived}
             onChange={(e) => setAmountReceived(e.target.value)}
@@ -151,8 +168,8 @@ export function Cart({
               {change < 0
                 ? `Short by ${formatKes(Math.abs(change))}`
                 : change > 0.001
-                ? `Change due: ${formatKes(change)}`
-                : 'Exact amount \u2014 no change'}
+                  ? `Change due: ${formatKes(change)}`
+                  : 'Exact amount \u2014 no change'}
             </div>
           )}
         </div>
@@ -179,8 +196,8 @@ export function Cart({
         {checkingOut
           ? 'Processing...'
           : method === 'cash'
-          ? 'Complete Cash Sale'
-          : 'Send STK Push'}
+            ? 'Complete Cash Sale'
+            : 'Send STK Push'}
       </button>
     </aside>
   );
