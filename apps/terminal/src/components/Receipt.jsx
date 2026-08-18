@@ -90,14 +90,21 @@ export function Receipt({ receipt, onClose, autoPrint = true }) {
             <span>{receipt.paymentMethod}</span>
           </div>
 
-          {receipt.amountReceived !== null && receipt.amountReceived !== undefined && (
+          {receipt.cashAmount !== null && receipt.cashAmount !== undefined && receipt.cashAmount > 0 && (
             <div className="receipt__line">
-              <span>Cash received</span>
-              <span>{formatKes(receipt.amountReceived)}</span>
+              <span>Cash</span>
+              <span>{formatKes(receipt.cashAmount)}</span>
             </div>
           )}
 
-          {receipt.changeGiven !== null && receipt.changeGiven !== undefined && (
+          {receipt.mpesaAmount !== null && receipt.mpesaAmount !== undefined && receipt.mpesaAmount > 0 && (
+            <div className="receipt__line">
+              <span>M-Pesa</span>
+              <span>{formatKes(receipt.mpesaAmount)}</span>
+            </div>
+          )}
+
+          {receipt.changeGiven !== null && receipt.changeGiven !== undefined && receipt.changeGiven > 0 && (
             <div className="receipt__line">
               <span>Change</span>
               <span>{formatKes(receipt.changeGiven)}</span>
