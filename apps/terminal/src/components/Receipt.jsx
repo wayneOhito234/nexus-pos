@@ -84,27 +84,33 @@ export function Receipt({ receipt, onClose, autoPrint = true }) {
 
         <hr />
 
+        {/*
+          Payment breakdown, aligned with the shape App.jsx now builds:
+          cashAmount / mpesaAmount / changeGiven / mpesaRef. Each line is
+          guarded on > 0 so a pure cash sale shows only cash, a pure M-Pesa
+          sale shows only M-Pesa, and a split prints both legs.
+        */}
         <div className="receipt__payment">
           <div className="receipt__line">
             <span>Paid via</span>
             <span>{receipt.paymentMethod}</span>
           </div>
 
-          {receipt.cashAmount !== null && receipt.cashAmount !== undefined && receipt.cashAmount > 0 && (
+          {receipt.cashAmount > 0 && (
             <div className="receipt__line">
-              <span>Cash</span>
+              <span>Cash received</span>
               <span>{formatKes(receipt.cashAmount)}</span>
             </div>
           )}
 
-          {receipt.mpesaAmount !== null && receipt.mpesaAmount !== undefined && receipt.mpesaAmount > 0 && (
+          {receipt.mpesaAmount > 0 && (
             <div className="receipt__line">
-              <span>M-Pesa</span>
+              <span>M-Pesa paid</span>
               <span>{formatKes(receipt.mpesaAmount)}</span>
             </div>
           )}
 
-          {receipt.changeGiven !== null && receipt.changeGiven !== undefined && receipt.changeGiven > 0 && (
+          {receipt.changeGiven > 0 && (
             <div className="receipt__line">
               <span>Change</span>
               <span>{formatKes(receipt.changeGiven)}</span>
