@@ -90,7 +90,7 @@ export function Receipt({ receipt, onClose, autoPrint = true }) {
           guarded on > 0 so a pure cash sale shows only cash, a pure M-Pesa
           sale shows only M-Pesa, and a split prints both legs.
         */}
-        <div className="receipt__payment">
+               <div className="receipt__payment">
           <div className="receipt__line">
             <span>Paid via</span>
             <span>{receipt.paymentMethod}</span>
@@ -110,6 +110,15 @@ export function Receipt({ receipt, onClose, autoPrint = true }) {
             </div>
           )}
 
+          {/* Only on a split -- on a single-method sale the total paid is
+              already the line above it, and repeating it just adds noise. */}
+          {receipt.cashAmount > 0 && receipt.mpesaAmount > 0 && (
+            <div className="receipt__line">
+              <span>Total paid</span>
+              <span>{formatKes(receipt.cashAmount + receipt.mpesaAmount)}</span>
+            </div>
+          )}
+
           {receipt.changeGiven > 0 && (
             <div className="receipt__line">
               <span>Change</span>
@@ -124,7 +133,6 @@ export function Receipt({ receipt, onClose, autoPrint = true }) {
             </div>
           )}
         </div>
-
         <hr />
 
         <p className="receipt__thanks">
