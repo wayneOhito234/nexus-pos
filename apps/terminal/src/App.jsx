@@ -144,12 +144,18 @@ export default function App() {
   // screen is open there's nothing to fall back to automatically -- the
   // screen itself disables those modes and the cashier picks cash.
 
-  // Greet the customer once a cashier is on duty and the cart is empty.
+  // Greet the customer once a cashier is on duty and the cart is empty --
+  // but NOT while a receipt is still on screen. A completed sale clears the
+  // cart, which would otherwise fire welcome() the same instant
+  // vfdSaleComplete() writes the change / thank-you, wiping it off the
+  // display before the customer sees it. Holding off until the receipt is
+  // dismissed lets the thank-you stand, then returns to the welcome screen
+  // as the next sale begins.
   useEffect(() => {
-    if (cashier && cart.length === 0) {
+    if (cashier && cart.length === 0 && !receipt) {
       window.nexusVfd?.welcome().catch(() => {});
     }
-  }, [cashier, cart.length]);
+  }, [cashier, cart.length, receipt]);
 
   const categories = useMemo(
     () => Array.from(new Set(products.map((p) => p.category))).sort(),
@@ -284,6 +290,9 @@ export default function App() {
 
     try {
       if (mpesaAmount > 0) {
+        // Tell the customer display which way they're paying as the request
+        // goes out -- SPLIT when there's also a cash portion, otherwise
+        // M-PESA. vfd.js normalises the casing.
         window.nexusVfd
           ?.checkout(total, cashAmount > 0 ? 'SPLIT' : 'M-PESA')
           .catch(() => {});
@@ -298,7 +307,6 @@ export default function App() {
         setPaymentStatus(
           `Waiting for the customer to approve on their phone... (ID: ${checkoutRequestId})`
         );
-
         const finalStatus = await pollPaymentStatus(checkoutRequestId);
 
         if (finalStatus.status !== 'confirmed') {
@@ -341,7 +349,7 @@ export default function App() {
         return;
       }
 
-      await completeSale({ cashAmount, mpesaAmount: mpesaPaid, mpesaRef });
+      await completeSale({ cashAmount, mpesaAmount: mpesaPaid, mpesaRef, change: 0 });
     } catch (err) {
       setPaymentStatus(`Payment failed: ${err.message}`);
       addToast(`Payment failed: ${err.message}`, 'error');
@@ -372,7 +380,7 @@ export default function App() {
     setPendingSale(null);
   }
 
-  async function completeSale({ cashAmount, mpesaAmount, mpesaRef }) {
+  async function completeSale({ cashAmount, mpesaAmount, mpesaRef, change = 0 }) {
     setCheckingOut(true);
     setPaymentStatus(null);
 
@@ -392,17 +400,26 @@ export default function App() {
             ? 'M-Pesa'
             : 'Cash';
 
+      // Prefer the server's figure, but fall back to the change we already
+      // worked out at payment time, so the receipt and the customer display
+      // still show it even if the server doesn't echo change_given back.
+      const changeGiven = Number(sale.change_given ?? change ?? 0);
+
+      // Build and show the receipt BEFORE clearing the cart -- buildReceipt
+      // reads the line items off the cart, and the Receipt component
+      // auto-prints when it mounts.
       setReceipt(
         buildReceipt(sale, label, {
-          cashAmount: sale.cash_amount,
-          mpesaAmount: sale.mpesa_amount,
-          changeGiven: sale.change_given,
+          cashAmount: sale.cash_amount ?? cashAmount,
+          mpesaAmount: sale.mpesa_amount ?? mpesaAmount,
+          changeGiven,
           mpesaRef: sale.mpesa_ref ?? mpesaRef,
         })
       );
 
+      // Customer display: change if any came back, otherwise the thank-you.
       window.nexusVfd
-        ?.saleComplete(Number(sale.change_given || 0), label.toUpperCase())
+        ?.saleComplete(changeGiven, label.toUpperCase())
         .catch(() => {});
 
       setCart([]);
