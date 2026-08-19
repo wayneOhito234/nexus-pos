@@ -6,7 +6,12 @@ export const mpesaRouter = Router();
 // Fine for a single-server demo; would move to Postgres for production.
 const pushes = new Map();
 
-const DARAJA_BASE = 'https://sandbox.safaricom.co.ke';
+// Switches based on DARAJA_ENV so the same code works against sandbox
+// during development and Noorcom's production shortcode once live.
+const DARAJA_BASE =
+  process.env.DARAJA_ENV === 'production'
+    ? 'https://api.safaricom.co.ke'
+    : 'https://sandbox.safaricom.co.ke';
 
 function simulatedMpesaRef() {
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
@@ -241,8 +246,14 @@ mpesaRouter.post('/callback', async (req, res) => {
 // exists purely so a live demo can move forward on command rather than
 // depending on that unreliable sandbox outcome.
 //
-// This MUST be removed or gated behind an environment flag before going live.
+// Hard-blocked in production: this must never be reachable once DARAJA_ENV
+// is 'production', since it would let anyone fake a paid sale against a
+// real shortcode without any money moving.
 mpesaRouter.post('/demo-confirm/:checkoutRequestId', (req, res) => {
+  if (process.env.DARAJA_ENV === 'production') {
+    return res.status(403).json({ error: 'demo confirmation is permanently disabled in production' });
+  }
+
   if (process.env.MPESA_ALLOW_DEMO_CONFIRM !== 'true') {
     return res.status(403).json({ error: 'demo confirmation is disabled' });
   }
