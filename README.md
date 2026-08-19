@@ -1,3 +1,19 @@
+### 1. Run the query
+```bash
+-- ─── Product hierarchy (structured supermarket classification) ────────────────
+ALTER TABLE products ADD COLUMN IF NOT EXISTS department   TEXT;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS section      TEXT;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS brand        TEXT;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS product_type TEXT;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS variant      TEXT;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS pack_size    NUMERIC(10, 2);
+ALTER TABLE products ADD COLUMN IF NOT EXISTS unit         TEXT;
+```
+### 2.0 Do the Migration
+```bash
+cd apps/server && node src/migrateProductHierarchy.js
+```
+
 ```bash
 Get-Content C:\nexus-pos\packages\shared\src\index.js
 ```
