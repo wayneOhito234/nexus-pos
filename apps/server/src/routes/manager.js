@@ -4,6 +4,10 @@ import { pool } from '../db.js';
 import { siteConfig } from '../../site.config.js';
 import { managerIpGuard, tillIpGuard } from '../ipAllowlist.js';
 import {
+  validateProductRow,
+  normaliseImportRow,
+} from '@nexus-pos/shared';
+import {
   createSession,
   revokeSession,
   revokeAllForCashier,
@@ -1063,7 +1067,8 @@ managerRouter.get('/drawer/history', ...managerOnly, async (req, res) => {
 managerRouter.get('/products', ...managerOnly, async (req, res) => {
   const { rows } = await pool.query(`
     SELECT id, sku, barcode, name, category, price, cost_price, stock_qty,
-           store_qty, reorder_level, active, created_at
+           store_qty, reorder_level, active, created_at,
+           department, section, brand, product_type, variant, pack_size, unit
     FROM products
     ORDER BY active DESC, name
   `);
@@ -1090,9 +1095,11 @@ managerRouter.get('/products/categories', ...managerOnly, async (req, res) => {
 });
 
 // POST /api/manager/products
-// body: { sku, barcode, name, category, price, cost_price?, stock_qty?, reorder_level? }
 managerRouter.post('/products', ...managerOnly, async (req, res) => {
-  const { sku, barcode, name, category, price, cost_price, stock_qty, reorder_level } = req.body;
+  const {
+    sku, barcode, name, category, price, cost_price, stock_qty, reorder_level,
+    department, section, brand, product_type, variant, pack_size, unit,
+  } = req.body;
 
   if (!sku || !barcode || !name || !category || price === undefined) {
     return res.status(400).json({ error: 'sku, barcode, name, category and price are required' });
@@ -1111,9 +1118,13 @@ managerRouter.post('/products', ...managerOnly, async (req, res) => {
   }
 
   const { rows } = await pool.query(
-    `INSERT INTO products (sku, barcode, name, category, price, cost_price, stock_qty, reorder_level)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-     RETURNING id, sku, barcode, name, category, price, cost_price, stock_qty, store_qty, reorder_level, active, created_at`,
+    `INSERT INTO products
+       (sku, barcode, name, category, price, cost_price, stock_qty, reorder_level,
+        department, section, brand, product_type, variant, pack_size, unit)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+     RETURNING id, sku, barcode, name, category, price, cost_price, stock_qty, store_qty,
+               reorder_level, active, created_at,
+               department, section, brand, product_type, variant, pack_size, unit`,
     [
       sku.trim(),
       barcode.trim(),
@@ -1123,6 +1134,13 @@ managerRouter.post('/products', ...managerOnly, async (req, res) => {
       cost_price ?? null,
       stock_qty ?? 0,
       reorder_level ?? 10,
+      department?.trim() || null,
+      section?.trim() || null,
+      brand?.trim() || null,
+      product_type?.trim() || null,
+      variant?.trim() || null,
+      pack_size ?? null,
+      unit?.trim() || null,
     ]
   );
 
@@ -1132,9 +1150,177 @@ managerRouter.post('/products', ...managerOnly, async (req, res) => {
   res.status(201).json(rows[0]);
 });
 
+// POST /api/manager/products/bulk  —  Excel inventory import
+// Validates every row on the server (never trusting the client), then inserts
+// the valid rows in a single transaction. Invalid / duplicate rows are skipped
+// and reported. A database error rolls the whole import back.
+managerRouter.post('/products/bulk', ...managerOnly, async (req, res) => {
+  const incoming = Array.isArray(req.body?.products) ? req.body.products : null;
+  if (!incoming) {
+    return res.status(400).json({ error: 'Expected a "products" array' });
+  }
+  if (incoming.length === 0) {
+    return res.status(400).json({ error: 'The file contained no product rows' });
+  }
+  if (incoming.length > 5000) {
+    return res.status(413).json({ error: 'Too many rows (limit 5000 per import)' });
+  }
+
+  // 1) Validate + normalise each row, and remember its 1-based spreadsheet row.
+  const prepared = [];
+  const errors = [];
+  incoming.forEach((raw, i) => {
+    const rowNo = Number(raw?.__row) || i + 2; // +2: header is row 1
+    const msgs = validateProductRow(raw);
+    if (msgs.length > 0) {
+      errors.push({ row: rowNo, messages: msgs });
+      return;
+    }
+    prepared.push({ rowNo, data: normaliseImportRow(raw) });
+  });
+
+  // 2) In-file duplicate detection for barcode and SKU.
+  const seenBarcode = new Map();
+  const seenSku = new Map();
+  const deduped = [];
+  for (const item of prepared) {
+    const { barcode, sku } = item.data;
+    if (barcode) {
+      const key = barcode.toLowerCase();
+      if (seenBarcode.has(key)) {
+        errors.push({ row: item.rowNo, messages: [`Duplicate Barcode in file (also row ${seenBarcode.get(key)})`] });
+        continue;
+      }
+      seenBarcode.set(key, item.rowNo);
+    }
+    if (sku) {
+      const key = sku.toLowerCase();
+      if (seenSku.has(key)) {
+        errors.push({ row: item.rowNo, messages: [`Duplicate SKU in file (also row ${seenSku.get(key)})`] });
+        continue;
+      }
+      seenSku.set(key, item.rowNo);
+    }
+    deduped.push(item);
+  }
+
+  // 3) Detect barcodes / SKUs that already exist in the database.
+  const barcodes = deduped.map((d) => d.data.barcode).filter(Boolean);
+  const skus = deduped.map((d) => d.data.sku).filter(Boolean);
+  const existingBarcodes = new Set();
+  const existingSkus = new Set();
+  if (barcodes.length > 0) {
+    const { rows } = await pool.query('SELECT barcode FROM products WHERE barcode = ANY($1)', [barcodes]);
+    rows.forEach((r) => existingBarcodes.add(String(r.barcode).toLowerCase()));
+  }
+  if (skus.length > 0) {
+    const { rows } = await pool.query('SELECT sku FROM products WHERE sku = ANY($1)', [skus]);
+    rows.forEach((r) => existingSkus.add(String(r.sku).toLowerCase()));
+  }
+
+  const toInsert = [];
+  for (const item of deduped) {
+    const problems = [];
+    if (item.data.barcode && existingBarcodes.has(item.data.barcode.toLowerCase())) {
+      problems.push('Barcode already exists in the catalogue');
+    }
+    if (item.data.sku && existingSkus.has(item.data.sku.toLowerCase())) {
+      problems.push('SKU already exists in the catalogue');
+    }
+    if (problems.length > 0) {
+      errors.push({ row: item.rowNo, messages: problems });
+      continue;
+    }
+    toInsert.push(item);
+  }
+
+  // 4) Auto-generate SKUs (continuing the PRD-#### sequence) for rows without one.
+  const { rows: skuRows } = await pool.query(`
+    SELECT sku FROM products
+    WHERE sku ~ '^PRD-[0-9]+$'
+    ORDER BY CAST(SUBSTRING(sku FROM 5) AS INTEGER) DESC
+    LIMIT 1
+  `);
+  let nextNum = skuRows.length > 0 ? parseInt(skuRows[0].sku.slice(4), 10) : 0;
+  for (const item of toInsert) {
+    if (!item.data.sku) {
+      nextNum += 1;
+      item.data.sku = `PRD-${String(nextNum).padStart(4, '0')}`;
+    }
+  }
+
+  // 5) Transactional insert.
+  const created = [];
+  if (toInsert.length > 0) {
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      for (const item of toInsert) {
+        const d = item.data;
+        const { rows } = await client.query(
+          `INSERT INTO products
+             (sku, barcode, name, category, price, cost_price, stock_qty, reorder_level,
+              department, section, brand, product_type, variant, pack_size, unit)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+           RETURNING id, sku, barcode, name, category, price, cost_price, stock_qty, store_qty,
+                     reorder_level, active, created_at,
+                     department, section, brand, product_type, variant, pack_size, unit`,
+          [
+            d.sku,
+            d.barcode || null,
+            d.product_name,
+            d.category || d.section || 'General',
+            d.selling_price,
+            d.cost_price,
+            d.stock_qty ?? 0,
+            d.reorder_level ?? 10,
+            d.department || null,
+            d.section || null,
+            d.brand || null,
+            d.product_type || null,
+            d.variant || null,
+            d.pack_size ?? null,
+            d.unit || null,
+          ]
+        );
+        created.push(rows[0]);
+      }
+      await client.query('COMMIT');
+    } catch (err) {
+      await client.query('ROLLBACK');
+      return res.status(500).json({
+        error: 'Import failed and was rolled back — no products were added.',
+        detail: err.message,
+        created: 0,
+        skipped: incoming.length,
+        errors,
+      });
+    } finally {
+      client.release();
+    }
+  }
+
+  // 6) Push new products to the tills live.
+  if (created.length > 0) {
+    req.app.get('io').emit('stock:updated', created);
+  }
+
+  errors.sort((a, b) => a.row - b.row);
+  res.status(201).json({
+    total: incoming.length,
+    created: created.length,
+    skipped: incoming.length - created.length,
+    errors,
+    products: created,
+  });
+});
+
 managerRouter.patch('/products/:id/details', ...managerOnly, async (req, res) => {
   const { id } = req.params;
-  const { sku, barcode, name, category, price, cost_price, reorder_level } = req.body;
+  const {
+    sku, barcode, name, category, price, cost_price, reorder_level,
+    department, section, brand, product_type, variant, pack_size, unit,
+  } = req.body;
 
   const fields = [];
   const values = [];
@@ -1154,6 +1340,13 @@ managerRouter.patch('/products/:id/details', ...managerOnly, async (req, res) =>
   maybe('price', price);
   maybe('cost_price', cost_price);
   maybe('reorder_level', reorder_level);
+  maybe('department', department === undefined ? undefined : (department?.trim() || null));
+  maybe('section', section === undefined ? undefined : (section?.trim() || null));
+  maybe('brand', brand === undefined ? undefined : (brand?.trim() || null));
+  maybe('product_type', product_type === undefined ? undefined : (product_type?.trim() || null));
+  maybe('variant', variant === undefined ? undefined : (variant?.trim() || null));
+  maybe('pack_size', pack_size === undefined ? undefined : (pack_size ?? null));
+  maybe('unit', unit === undefined ? undefined : (unit?.trim() || null));
 
   if (fields.length === 0) {
     return res.status(400).json({ error: 'Nothing to update' });
@@ -1173,7 +1366,9 @@ managerRouter.patch('/products/:id/details', ...managerOnly, async (req, res) =>
 
   const { rows } = await pool.query(
     `UPDATE products SET ${fields.join(', ')} WHERE id = $${i}
-     RETURNING id, sku, barcode, name, category, price, cost_price, stock_qty, store_qty, reorder_level, active`,
+     RETURNING id, sku, barcode, name, category, price, cost_price, stock_qty, store_qty,
+               reorder_level, active,
+               department, section, brand, product_type, variant, pack_size, unit`,
     values
   );
 

@@ -88,3 +88,11 @@ EXCEPTION WHEN duplicate_column THEN NULL; END $$;
 DO $$ BEGIN
   ALTER TABLE sales ADD COLUMN change_given NUMERIC(10, 2);
 EXCEPTION WHEN duplicate_column THEN NULL; END $$;
+-- ─── Product hierarchy (structured supermarket classification) ────────────────
+ALTER TABLE products ADD COLUMN IF NOT EXISTS department   TEXT;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS section      TEXT;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS brand        TEXT;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS product_type TEXT;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS variant      TEXT;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS pack_size    NUMERIC(10, 2);
+ALTER TABLE products ADD COLUMN IF NOT EXISTS unit         TEXT;

@@ -1,5 +1,7 @@
 export const VAT_RATE = 0.16;
 
+export * from './taxonomy.js';
+
 export const PAYMENT_METHODS = {
   CASH: 'cash',
   MPESA: 'mpesa',

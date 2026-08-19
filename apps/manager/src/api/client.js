@@ -82,6 +82,8 @@ export const fetchAllProducts = () => get('/api/manager/products');
 export const fetchNextSku = () => get('/api/manager/products/next-sku');
 export const fetchCategories = () => get('/api/manager/products/categories');
 export const createProduct = (p) => post('/api/manager/products', p);
+export const bulkImportProducts = (products) =>
+  post('/api/manager/products/bulk', { products });
 export const updateProductDetails = (id, changes) =>
   patch(`/api/manager/products/${id}/details`, changes);
 export const setProductActive = (id, active) =>

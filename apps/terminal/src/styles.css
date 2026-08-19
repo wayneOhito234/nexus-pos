@@ -2512,3 +2512,7 @@ input:focus-visible {
   color: var(--surface-1); font-weight: 700; font-size: 1rem; cursor: pointer;
 }
 .pay__take:disabled { opacity: 0.45; cursor: not-allowed; }
+/* Two-level category navigation (Department row above Sections) */
+.category-nav { display: flex; flex-direction: column; gap: 6px; }
+.category-tabs--dept { opacity: 0.95; }
+.category-tabs--dept .category-tab { font-weight: 600; }

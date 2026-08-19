@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Plus, Search, AlertTriangle, Archive, RotateCcw, Save, X, Pencil } from 'lucide-react';
+import { Plus, Search, AlertTriangle, Archive, RotateCcw, Save, X, Pencil, Upload } from 'lucide-react';
 import {
   fetchAllProducts,
   fetchNextSku,
@@ -8,6 +8,8 @@ import {
   updateProductDetails,
   setProductActive,
 } from '../api/client.js';
+import { ImportInventory } from './ImportInventory.jsx';
+import { DEPARTMENTS, sectionsFor, UNITS, composeProductName } from '@nexus-pos/shared';
 
 const kes = (v) =>
   v === null || v === undefined || v === ''
@@ -16,7 +18,10 @@ const kes = (v) =>
 
 const EMPTY = {
   sku: '', barcode: '', name: '', category: '',
+  department: '', section: '', brand: '', product_type: '', variant: '',
+  pack_size: '', unit: '',
   price: '', cost_price: '', stock_qty: '', reorder_level: '10',
+  autoName: true,
 };
 
 export function ProductsView({ onNotify }) {
@@ -38,6 +43,8 @@ export function ProductsView({ onNotify }) {
   // Inline confirm state — replaces window.confirm() so Electron
   // never opens a native blocking dialog that freezes focus.
   const [confirmingId, setConfirmingId] = useState(null);
+
+  const [showImport, setShowImport] = useState(false);
 
   useEffect(() => { loadAll(); }, []);
 
@@ -101,10 +108,18 @@ export function ProductsView({ onNotify }) {
       barcode:       p.barcode      ?? '',
       name:          p.name         ?? '',
       category:      p.category     ?? '',
+      department:    p.department    ?? '',
+      section:       p.section       ?? '',
+      brand:         p.brand         ?? '',
+      product_type:  p.product_type  ?? '',
+      variant:       p.variant       ?? '',
+      pack_size:     p.pack_size     ?? '',
+      unit:          p.unit          ?? '',
       price:         p.price        ?? '',
       cost_price:    p.cost_price   ?? '',
       stock_qty:     p.stock_qty    ?? '',
       reorder_level: p.reorder_level ?? '',
+      autoName:      false,
     });
   }
 
@@ -117,11 +132,37 @@ export function ProductsView({ onNotify }) {
 
   const set = (field, value) => setDraft((d) => ({ ...d, [field]: value }));
 
+  // Hierarchy fields: picking a Department resets Section; picking a Section
+  // mirrors it into `category` (kept for backward compatibility with the till);
+  // Brand/Type/Variant/Size rebuild the name while it's still auto-generated.
+  const setHier = (field, value) =>
+    setDraft((d) => {
+      const next = { ...d, [field]: value };
+      if (field === 'department') next.section = '';
+      if (field === 'section' && value) next.category = value;
+      if (next.autoName) {
+        const composed = composeProductName({
+          brand: next.brand,
+          product_type: next.product_type,
+          variant: next.variant,
+          pack_size: next.pack_size,
+          unit: next.unit,
+        });
+        if (composed) next.name = composed;
+      }
+      return next;
+    });
+
+  // Typing in the name field stops it from being auto-overwritten.
+  const setName = (value) => setDraft((d) => ({ ...d, name: value, autoName: false }));
+
   function validate() {
     if (!draft.name.trim())     return 'Give the product a name.';
     if (!draft.sku.trim())      return 'Every product needs a SKU.';
     if (!draft.barcode.trim())  return 'Enter a barcode so this can be scanned at the till.';
-    if (!draft.category.trim()) return 'Choose or type a category.';
+    if (!draft.category.trim()) return 'Choose a Department and Section.';
+    if (draft.pack_size !== '' && (Number.isNaN(Number(draft.pack_size)) || Number(draft.pack_size) < 0))
+      return 'Pack size must be a number.';
     if (draft.price === '' || Number(draft.price) < 0)
       return 'Enter a selling price of zero or more.';
     if (draft.cost_price !== '' && Number(draft.cost_price) > Number(draft.price))
@@ -142,6 +183,13 @@ export function ProductsView({ onNotify }) {
       barcode:       draft.barcode.trim(),
       name:          draft.name.trim(),
       category:      draft.category.trim(),
+      department:    draft.department.trim() || null,
+      section:       draft.section.trim() || null,
+      brand:         draft.brand.trim() || null,
+      product_type:  draft.product_type.trim() || null,
+      variant:       draft.variant.trim() || null,
+      pack_size:     draft.pack_size === '' ? null : Number(draft.pack_size),
+      unit:          draft.unit.trim() || null,
       price:         Number(draft.price),
       cost_price:    draft.cost_price === '' ? null : Number(draft.cost_price),
       reorder_level: draft.reorder_level === '' ? 10 : Number(draft.reorder_level),
@@ -203,6 +251,14 @@ export function ProductsView({ onNotify }) {
         <h2>Products</h2>
       </header>
 
+      {showImport && (
+        <ImportInventory
+          onClose={() => setShowImport(false)}
+          onNotify={onNotify}
+          onImported={() => { loadAll(); }}
+        />
+      )}
+
       <div className="catalogue">
         {/* ── Left: product list ── */}
         <div className="catalogue__list-pane">
@@ -215,6 +271,10 @@ export function ProductsView({ onNotify }) {
                 onChange={(e) => setSearch(e.target.value)}
               />
             </div>
+            <button className="catalogue__import" onClick={() => setShowImport(true)}>
+              <Upload size={15} />
+              Upload Inventory
+            </button>
             <button className="catalogue__new" onClick={startCreate}>
               <Plus size={15} />
               New product
@@ -370,11 +430,11 @@ export function ProductsView({ onNotify }) {
               </div>
 
               <label className="catalogue__field">
-                <span>Product name</span>
+                <span>Product name {draft.autoName && <em className="catalogue__hint">auto</em>}</span>
                 <input
                   value={draft.name}
-                  onChange={(e) => set('name', e.target.value)}
-                  placeholder="Brookside Fresh Milk 500ml"
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="Auto-built from Brand + Type + Size — or type your own"
                   autoFocus
                 />
               </label>
@@ -394,18 +454,79 @@ export function ProductsView({ onNotify }) {
                 </label>
               </div>
 
-              <label className="catalogue__field">
-                <span>Category</span>
-                <input
-                  list="mgr-categories"
-                  value={draft.category}
-                  onChange={(e) => set('category', e.target.value)}
-                  placeholder="Dairy"
-                />
-                <datalist id="mgr-categories">
-                  {categories.map((c) => <option key={c} value={c} />)}
-                </datalist>
-              </label>
+              <div className="catalogue__field-row">
+                <label className="catalogue__field">
+                  <span>Department</span>
+                  <select
+                    value={draft.department}
+                    onChange={(e) => setHier('department', e.target.value)}
+                  >
+                    <option value="">Select department…</option>
+                    {DEPARTMENTS.map((d) => <option key={d} value={d}>{d}</option>)}
+                  </select>
+                </label>
+                <label className="catalogue__field">
+                  <span>Section</span>
+                  <select
+                    value={draft.section}
+                    onChange={(e) => setHier('section', e.target.value)}
+                    disabled={!draft.department}
+                  >
+                    <option value="">
+                      {draft.department ? 'Select section…' : 'Pick a department first'}
+                    </option>
+                    {sectionsFor(draft.department).map((s) => (
+                      <option key={s} value={s}>{s}</option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+
+              <div className="catalogue__field-row">
+                <label className="catalogue__field">
+                  <span>Brand</span>
+                  <input
+                    value={draft.brand}
+                    onChange={(e) => setHier('brand', e.target.value)}
+                    placeholder="Dairy Fresh"
+                  />
+                </label>
+                <label className="catalogue__field">
+                  <span>Product type</span>
+                  <input
+                    value={draft.product_type}
+                    onChange={(e) => setHier('product_type', e.target.value)}
+                    placeholder="Long Life Milk"
+                  />
+                </label>
+              </div>
+
+              <div className="catalogue__field-row">
+                <label className="catalogue__field">
+                  <span>Variant <em className="catalogue__hint">optional</em></span>
+                  <input
+                    value={draft.variant}
+                    onChange={(e) => setHier('variant', e.target.value)}
+                    placeholder="Low Fat"
+                  />
+                </label>
+                <label className="catalogue__field catalogue__field--sm">
+                  <span>Pack size</span>
+                  <input
+                    value={draft.pack_size}
+                    onChange={(e) => setHier('pack_size', e.target.value)}
+                    placeholder="500"
+                    inputMode="decimal"
+                  />
+                </label>
+                <label className="catalogue__field catalogue__field--sm">
+                  <span>Unit</span>
+                  <select value={draft.unit} onChange={(e) => setHier('unit', e.target.value)}>
+                    <option value="">—</option>
+                    {UNITS.map((u) => <option key={u} value={u}>{u}</option>)}
+                  </select>
+                </label>
+              </div>
 
               <div className="catalogue__field-row">
                 <label className="catalogue__field">

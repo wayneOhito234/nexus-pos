@@ -42,6 +42,7 @@ export default function App() {
   const [online, setOnline] = useState(false);
   const [search, setSearch] = useState('');
   const [category, setCategory] = useState('All');
+  const [department, setDepartment] = useState('All');
   const [cart, setCart] = useState([]);
   const [checkingOut, setCheckingOut] = useState(false);
   const [paymentStatus, setPaymentStatus] = useState(null);
@@ -272,17 +273,36 @@ export default function App() {
     }
   }, [cashier, cart.length, receipt]);
 
-  const categories = useMemo(
-    () => Array.from(new Set(products.map((p) => p.category))).sort(),
+  // Two-level navigation. Every product has a section (imported products set
+  // it directly; legacy products fall back to their category). Department is a
+  // higher grouping that only exists for products imported with the hierarchy,
+  // so the department row only appears once there are departments to show.
+  const sectionOf = (p) => p.section || p.category;
+
+  const departments = useMemo(
+    () => Array.from(new Set(products.map((p) => p.department).filter(Boolean))).sort(),
     [products]
   );
+
+  const sections = useMemo(() => {
+    const inDept = products.filter((p) => department === 'All' || p.department === department);
+    return Array.from(new Set(inDept.map(sectionOf).filter(Boolean))).sort();
+  }, [products, department]);
+
+  function selectDepartment(dept) {
+    setDepartment(dept);
+    setCategory('All'); // reset the section when the department changes
+  }
 
   const visibleProducts = useMemo(() => {
     const query = search.trim().toLowerCase();
 
     return products.filter((p) => {
-      const matchesCategory =
-        category === 'All' || p.category === category;
+      const matchesDepartment =
+        department === 'All' || p.department === department;
+
+      const matchesSection =
+        category === 'All' || sectionOf(p) === category;
 
       const matchesQuery =
         !query ||
@@ -290,9 +310,9 @@ export default function App() {
         p.sku.toLowerCase().includes(query) ||
         (p.barcode || '').toLowerCase().includes(query);
 
-      return matchesCategory && matchesQuery;
+      return matchesDepartment && matchesSection && matchesQuery;
     });
-  }, [products, search, category]);
+  }, [products, search, category, department]);
 
   // Shelf prices are VAT-inclusive, so the total is simply the sum of the
   // line prices and the VAT is the portion already inside it. This mirrors
@@ -876,9 +896,12 @@ export default function App() {
         />
 
         <CategoryTabs
-          categories={categories}
-          selected={category}
-          onSelect={setCategory}
+          departments={departments}
+          sections={sections}
+          selectedDepartment={department}
+          selectedSection={category}
+          onSelectDepartment={selectDepartment}
+          onSelectSection={setCategory}
         />
       </div>
 
