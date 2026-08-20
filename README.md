@@ -1,3 +1,9 @@
+### 0. On The Shop Server Powershell
+```bash
+[Convert]::ToBase64String((1..32 | ForEach-Object { Get-Random -Max 256 }))
+```
+
+
 ### 1. Run the query
 ```bash
 -- ═══════════════════════════════════════════════════════════════════════════
