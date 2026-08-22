@@ -6,9 +6,10 @@ import { Server } from 'socket.io';
 import { pool } from './db.js';
 import { siteConfig } from '../site.config.js';
 import { ipAllowlist, managerIpGuard, mpesaCallbackAllowlist } from './ipAllowlist.js';
+import { startMpesaPoller } from './mpesaPoller.js';
 import { productsRouter } from './routes/products.js';
 import { salesRouter } from './routes/sales.js';
-import { mpesaRouter } from './routes/mpesa.js';
+import { mpesaRouter, processMpesaCallback } from './routes/mpesa.js';
 import { managerRouter } from './routes/manager.js';
 import { analyticsRouter } from './routes/analytics.js';
 import { inventoryRouter } from './routes/inventory.js';
@@ -31,7 +32,9 @@ app.get('/health', (req, res) => {
 });
 
 // The M-Pesa callback arrives from Safaricom, not the store LAN, so it gets
-// its own allowlist rather than being left open.
+// its own allowlist rather than being left open. Kept for the case where
+// Safaricom reaches the shop directly -- the usual path now is the relay on
+// cPanel, which the poller collects from.
 app.use('/api/mpesa/callback', mpesaCallbackAllowlist);
 
 // Everything else is restricted to the store's own till and manager machines.
@@ -73,6 +76,16 @@ httpServer.listen(PORT, () => {
   console.log(`Site: ${siteConfig.siteName}`);
   console.log(`Tills: ${siteConfig.tillIps.join(', ') || 'none configured'}`);
   console.log(`Manager: ${siteConfig.managerIps.join(', ') || 'unrestricted'}`);
+  console.log(`M-Pesa: ${process.env.DARAJA_ENV === 'production' ? 'PRODUCTION' : 'sandbox'}`);
+
+  // Started after the server is listening, so a slow relay can't hold up
+  // the tills coming online.
+  startMpesaPoller((body) => processMpesaCallback(body, io));
 });
 
+// Close the database pool cleanly on shutdown, so in-flight queries finish
+// rather than being cut off mid-transaction.
 process.on('SIGTERM', () => pool.end());
+process.on('SIGINT', () => {
+  pool.end().finally(() => process.exit(0));
+});

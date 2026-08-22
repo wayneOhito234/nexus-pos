@@ -2,12 +2,13 @@ import { Router } from 'express';
 
 export const mpesaRouter = Router();
 
-// In-memory store of pending/settled STK push requests, keyed by CheckoutRequestID.
-// Fine for a single-server demo; would move to Postgres for production.
+// In-memory store of pending/settled STK push requests, keyed by
+// CheckoutRequestID. Fine for a single-server shop; would move to Postgres
+// if this ever ran across multiple instances.
 const pushes = new Map();
 
-// Switches based on DARAJA_ENV so the same code works against sandbox
-// during development and Noorcom's production shortcode once live.
+// Switches based on DARAJA_ENV so the same code works against sandbox during
+// development and the production shortcode once live.
 const DARAJA_BASE =
   process.env.DARAJA_ENV === 'production'
     ? 'https://api.safaricom.co.ke'
@@ -50,9 +51,9 @@ function daraTimestamp() {
   );
 }
 
-// Asks Safaricom directly what the real status of a transaction is.
-// Used both by the /query route and by the callback handler, so a callback's
-// claims are never taken at face value.
+// Asks Safaricom directly what the real status of a transaction is. Used by
+// the /query route and by the callback handler, so a callback's claims are
+// never taken at face value.
 async function queryDaraja(checkoutRequestId) {
   const accessToken = await getAccessToken();
   const shortcode = process.env.DARAJA_SHORTCODE;
@@ -76,6 +77,79 @@ async function queryDaraja(checkoutRequestId) {
 
   return queryRes.json();
 }
+
+// ============================================================
+// Callback handling
+//
+// Extracted from the route so the relay poller can call it too. Safaricom
+// posts to the relay on cPanel, the shop collects from there, and both paths
+// end up here.
+//
+// The body is treated as a NOTIFICATION, never as proof. Anyone who learns
+// the URL could POST a fake "payment confirmed" message, so before marking
+// anything paid we ask Safaricom directly whether the transaction actually
+// succeeded. Only Safaricom's own answer is trusted.
+// ============================================================
+
+export async function processMpesaCallback(body, io) {
+  const callback = body?.Body?.stkCallback;
+  if (!callback) {
+    console.warn('Malformed callback payload, ignoring');
+    return;
+  }
+
+  const { CheckoutRequestID } = callback;
+  const entry = pushes.get(CheckoutRequestID);
+
+  if (!entry) {
+    console.warn(`Callback for unknown CheckoutRequestID: ${CheckoutRequestID}`);
+    return;
+  }
+
+  // Don't re-process something already settled.
+  if (entry.status === 'confirmed' || entry.status === 'failed') {
+    return;
+  }
+
+  try {
+    const verified = await queryDaraja(CheckoutRequestID);
+    const resultCode = String(verified.ResultCode);
+
+    if (resultCode === '0') {
+      // Take the receipt number from the callback metadata if present, since
+      // the query response doesn't always include it.
+      const items = callback.CallbackMetadata?.Item || [];
+      const get = (name) => items.find((i) => i.Name === name)?.Value;
+
+      entry.status = 'confirmed';
+      entry.mpesaRef = get('MpesaReceiptNumber') || verified.MpesaReceiptNumber || null;
+      entry.amountPaid = get('Amount') ?? null;
+      entry.verified = true;
+
+      console.log(`Payment confirmed: ${CheckoutRequestID}, ref ${entry.mpesaRef}`);
+    } else {
+      entry.status = 'failed';
+      entry.resultDesc = verified.ResultDesc || callback.ResultDesc;
+      entry.verified = true;
+
+      console.log(`Payment failed: ${CheckoutRequestID}, ${entry.resultDesc}`);
+    }
+  } catch (err) {
+    // Verification itself failed -- network, auth, Safaricom down. Leave the
+    // transaction pending rather than trusting the unverified callback. The
+    // terminal's polling keeps checking and /query can be called manually.
+    // Better a stuck pending sale than a falsely confirmed one.
+    console.error(`Callback verification failed for ${CheckoutRequestID}:`, err.message);
+    entry.verificationError = err.message;
+  }
+
+  pushes.set(CheckoutRequestID, entry);
+  io?.emit('mpesa:updated', { checkoutRequestId: CheckoutRequestID, ...entry });
+}
+
+// ============================================================
+// Routes
+// ============================================================
 
 // POST /api/mpesa/stkpush
 // body: { phone, amount, terminal_id }
@@ -110,8 +184,8 @@ mpesaRouter.post('/stkpush', async (req, res) => {
         PartyB: shortcode,
         PhoneNumber: phone,
         CallBackURL: process.env.DARAJA_CALLBACK_URL,
-        AccountReference: 'Nexus POS',
-        TransactionDesc: 'Exit Mart purchase',
+        AccountReference: 'Zummart',
+        TransactionDesc: 'Zummart Supermarket purchase',
       }),
     });
 
@@ -141,8 +215,8 @@ mpesaRouter.post('/stkpush', async (req, res) => {
 });
 
 // GET /api/mpesa/status/:checkoutRequestId
-// Terminal polls this while showing "waiting for confirmation". Reflects
-// whatever the callback, /query, or /demo-confirm last set it to.
+// The till polls this while showing "waiting for confirmation". Reflects
+// whatever the callback, /query or /demo-confirm last set it to.
 mpesaRouter.get('/status/:checkoutRequestId', (req, res) => {
   const entry = pushes.get(req.params.checkoutRequestId);
   if (!entry) {
@@ -152,7 +226,8 @@ mpesaRouter.get('/status/:checkoutRequestId', (req, res) => {
 });
 
 // GET /api/mpesa/query/:checkoutRequestId
-// Actively asks Safaricom for the current status.
+// Actively asks Safaricom for the current status. Useful when a callback
+// never arrives and a sale is stuck pending.
 mpesaRouter.get('/query/:checkoutRequestId', async (req, res) => {
   const { checkoutRequestId } = req.params;
 
@@ -164,6 +239,9 @@ mpesaRouter.get('/query/:checkoutRequestId', async (req, res) => {
       entry.status = String(data.ResultCode) === '0' ? 'confirmed' : 'failed';
       entry.resultDesc = data.ResultDesc;
       pushes.set(checkoutRequestId, entry);
+
+      const io = req.app.get('io');
+      io?.emit('mpesa:updated', { checkoutRequestId, ...entry });
     }
 
     res.json({ checkoutRequestId, ...data });
@@ -174,81 +252,22 @@ mpesaRouter.get('/query/:checkoutRequestId', async (req, res) => {
 });
 
 // POST /api/mpesa/callback
-// Safaricom calls this once a real payment resolves.
-//
-// The callback body is treated as a NOTIFICATION, not as proof. Anyone who
-// learns this URL could POST a fake "payment confirmed" message, so before
-// marking anything paid we ask Safaricom directly whether the transaction
-// actually succeeded. Only Safaricom's own answer is trusted.
+// Kept for the case where Safaricom reaches the shop directly. The usual
+// path now is the relay on cPanel, which the poller collects from.
 mpesaRouter.post('/callback', async (req, res) => {
-  const callback = req.body?.Body?.stkCallback;
-
-  if (!callback) {
-    return res.status(400).json({ error: 'malformed callback payload' });
-  }
-
-  const { CheckoutRequestID } = callback;
-  const entry = pushes.get(CheckoutRequestID);
-
-  // Always acknowledge quickly -- Safaricom retries on non-200 responses,
-  // and we don't want retries stacking up while verification runs.
+  // Acknowledge immediately -- Safaricom retries on any non-200, and retries
+  // mean duplicate confirmations to untangle.
   res.status(200).json({ received: true });
-
-  if (!entry) {
-    console.warn(`callback for unknown CheckoutRequestID: ${CheckoutRequestID}`);
-    return;
-  }
-
-  // Don't re-process something already settled.
-  if (entry.status === 'confirmed' || entry.status === 'failed') {
-    return;
-  }
-
-  try {
-    const verified = await queryDaraja(CheckoutRequestID);
-    const resultCode = String(verified.ResultCode);
-
-    if (resultCode === '0') {
-      // Safaricom confirms the payment. Take the receipt number from the
-      // callback metadata if present, since the query response doesn't
-      // always include it.
-      const items = callback.CallbackMetadata?.Item || [];
-      const get = (name) => items.find((i) => i.Name === name)?.Value;
-
-      entry.status = 'confirmed';
-      entry.mpesaRef = get('MpesaReceiptNumber') || verified.MpesaReceiptNumber || null;
-      entry.amountPaid = get('Amount') ?? null;
-      entry.verified = true;
-    } else {
-      entry.status = 'failed';
-      entry.resultDesc = verified.ResultDesc || callback.ResultDesc;
-      entry.verified = true;
-    }
-  } catch (err) {
-    // Verification itself failed (network, auth, Safaricom down). Leave the
-    // transaction pending rather than trusting the unverified callback --
-    // the terminal's polling will keep checking, and /query can be called
-    // manually. Better a stuck pending sale than a falsely confirmed one.
-    console.error(`callback verification failed for ${CheckoutRequestID}:`, err.message);
-    entry.verificationError = err.message;
-  }
-
-  pushes.set(CheckoutRequestID, entry);
-
-  const io = req.app.get('io');
-  io.emit('mpesa:updated', { checkoutRequestId: CheckoutRequestID, ...entry });
+  await processMpesaCallback(req.body, req.app.get('io'));
 });
 
 // POST /api/mpesa/demo-confirm/:checkoutRequestId
-// Manually marks a transaction as confirmed, overriding whatever Safaricom's
-// sandbox reported. The sandbox test number has no real phone to approve
-// the prompt, so it reliably times out or fails on its own -- this route
-// exists purely so a live demo can move forward on command rather than
-// depending on that unreliable sandbox outcome.
+// Manually marks a transaction as confirmed. The sandbox test number has no
+// real phone to approve the prompt, so it reliably times out -- this exists
+// so a demo can move forward rather than depending on that.
 //
-// Hard-blocked in production: this must never be reachable once DARAJA_ENV
-// is 'production', since it would let anyone fake a paid sale against a
-// real shortcode without any money moving.
+// Hard-blocked in production: it would otherwise let anyone fake a paid sale
+// against a real shortcode with no money moving.
 mpesaRouter.post('/demo-confirm/:checkoutRequestId', (req, res) => {
   if (process.env.DARAJA_ENV === 'production') {
     return res.status(403).json({ error: 'demo confirmation is permanently disabled in production' });
@@ -271,7 +290,7 @@ mpesaRouter.post('/demo-confirm/:checkoutRequestId', (req, res) => {
   pushes.set(checkoutRequestId, entry);
 
   const io = req.app.get('io');
-  io.emit('mpesa:updated', { checkoutRequestId, ...entry });
+  io?.emit('mpesa:updated', { checkoutRequestId, ...entry });
 
   res.json({ checkoutRequestId, ...entry });
 });
