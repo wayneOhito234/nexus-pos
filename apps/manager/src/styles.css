@@ -240,7 +240,7 @@ body {
 .catalogue__toggle { display: flex; align-items: center; gap: 6px; cursor: pointer; }
 .catalogue__lowstock-badge { display: inline-flex; align-items: center; gap: 5px; margin-left: auto; padding: 5px 10px; border-radius: 999px; background: rgba(248,113,113,0.12); color: var(--bad); font-weight: 700; font-size: 0.74rem; }
 .catalogue__rows { max-height: 62vh; overflow-y: auto; border: 1px solid var(--line); border-radius: var(--r); }
-.catalogue__row { display: grid; grid-template-columns: minmax(0,1fr) 106px 66px 66px 38px; align-items: center; gap: 10px; padding: 11px 14px; border-bottom: 1px solid var(--line); cursor: pointer; }
+.catalogue__row { display: grid; grid-template-columns: minmax(0,1fr) 106px 66px 66px 116px; align-items: center; gap: 10px; padding: 11px 14px; border-bottom: 1px solid var(--line); cursor: pointer; }
 .catalogue__row:last-child { border-bottom: none; }
 .catalogue__row:hover { background: var(--surface-2); }
 .catalogue__row--head { position: sticky; top: 0; z-index: 1; background: var(--surface); cursor: default; font-size: 0.7rem; letter-spacing: 0.5px; text-transform: uppercase; color: var(--text-dim); }
@@ -254,8 +254,18 @@ body {
 .catalogue__cell-stock { display: flex; align-items: center; gap: 5px; font-size: 0.88rem; font-weight: 600; font-variant-numeric: tabular-nums; }
 .catalogue__cell-stock.is-low { color: var(--bad); }
 .catalogue__cell-stock.muted { color: var(--text-dim); font-weight: 400; }
-.catalogue__archive-btn { background: none; border: none; color: var(--text-dim); cursor: pointer; padding: 6px; border-radius: 6px; }
-.catalogue__archive-btn:hover { background: var(--bg); color: var(--text); }
+.catalogue__archive-btn { background: none; border: 1px solid transparent; color: var(--text-dim); cursor: pointer; padding: 6px; border-radius: 6px; }
+.catalogue__archive-btn:hover { background: var(--bg); color: var(--text); border-color: var(--line-strong); }
+
+/* Product row actions — edit + archive buttons sit on one line; inline Archive?/Restore? confirm. */
+.catalogue__row-actions { display: flex; align-items: center; justify-content: flex-end; gap: 4px; min-width: 0; }
+.catalogue__edit-btn { display: inline-flex; align-items: center; justify-content: center; padding: 6px; border: 1px solid transparent; border-radius: 6px; background: none; color: var(--text-dim); cursor: pointer; }
+.catalogue__edit-btn:hover { color: var(--accent); border-color: var(--accent); background: rgba(56, 189, 248, 0.1); }
+.catalogue__confirm-label { font-size: 0.72rem; color: var(--text-dim); margin-right: 1px; white-space: nowrap; }
+.catalogue__confirm-yes, .catalogue__confirm-no { padding: 3px 8px; border-radius: 6px; font-size: 0.72rem; font-weight: 600; cursor: pointer; border: 1px solid var(--line-strong); background: var(--surface-2); color: var(--text); }
+.catalogue__confirm-yes { border-color: var(--bad); color: var(--bad); background: rgba(248, 113, 113, 0.12); }
+.catalogue__confirm-yes:hover { background: rgba(248, 113, 113, 0.2); }
+.catalogue__confirm-no:hover { border-color: var(--accent); color: var(--accent); }
 .catalogue__form-pane { border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
 .catalogue__placeholder { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 50px 30px; text-align: center; }
 .catalogue__placeholder-title { margin: 0; font-weight: 600; }
@@ -271,6 +281,20 @@ body {
 .catalogue__field > span em { font-style: normal; font-weight: 400; text-transform: none; letter-spacing: 0; opacity: 0.7; }
 .catalogue__field input { padding: 10px 12px; background: var(--surface-2); border: 1px solid var(--line-strong); border-radius: 6px; color: var(--text); font-size: 0.88rem; }
 .catalogue__field input:focus { outline: none; border-color: var(--accent); }
+/* Dropdowns match the text inputs; appearance reset + custom arrow so Windows
+   does not render <select> as a white native control (Department / Section / Unit). */
+.catalogue__field select {
+  width: 100%; padding: 10px 12px; padding-right: 34px;
+  background-color: var(--surface-2); color: var(--text);
+  border: 1px solid var(--line-strong); border-radius: 6px;
+  font-size: 0.88rem; cursor: pointer;
+  appearance: none; -webkit-appearance: none; -moz-appearance: none;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%238b9bb4' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'/></svg>");
+  background-repeat: no-repeat; background-position: right 12px center;
+}
+.catalogue__field select:focus { outline: none; border-color: var(--accent); }
+.catalogue__field select:disabled { opacity: 0.55; cursor: not-allowed; }
+.catalogue__field select option { background: var(--surface); color: var(--text); }
 .catalogue__margin { margin: 0; padding: 9px 12px; border-radius: 6px; background: rgba(74,222,128,0.12); color: var(--good); font-size: 0.82rem; font-weight: 600; }
 .catalogue__margin.is-negative { background: rgba(248,113,113,0.12); color: var(--bad); }
 .catalogue__hint { margin: 0; font-size: 0.76rem; color: var(--text-dim); line-height: 1.45; }
